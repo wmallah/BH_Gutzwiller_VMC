@@ -1,4 +1,4 @@
-include("vmc_bose-hubbard.jl")
+include("../src/vmc_bose-hubbard.jl")
 
 Lx, Ly = 2, 2                   # Small 2D system (4 sites)
 n_max = 3                       # Max occupation per site
