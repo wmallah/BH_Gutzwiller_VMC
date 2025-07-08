@@ -1,5 +1,4 @@
 using Optim
-using Plots
 using Statistics
 include("VMCBoseHubbard.jl")
 using .VMCBoseHubbard

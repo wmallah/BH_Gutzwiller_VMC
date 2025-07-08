@@ -250,7 +250,7 @@ function VMC_fixed_particles(sys::System, κ::Real, n_max::Int, N_total::Int;
                              num_walkers::Int=200, num_MC_steps::Int=20000, num_equil_steps::Int=5000)
 
     if num_MC_steps <= num_equil_steps
-    error("num_MC_steps must be greater than num_equil_steps")
+        error("num_MC_steps must be greater than num_equil_steps")
     end
 
     L = length(sys.lattice.neighbors)
@@ -265,19 +265,16 @@ function VMC_fixed_particles(sys::System, κ::Real, n_max::Int, N_total::Int;
             n_old = walkers[i]
             n_new = copy(n_old)
             moved = false
+
             for attempt in 1:20
-                # Select random sites to determine if hop is possible
-                from, to = rand(1:L, 2)
-                # Loop until source and destination sites are different from each other
-                while from == to
-                    to = rand(1:L)
-                end
-                # Could replace the stand-alone if statement with the "hop_possible" function
+                from = rand(1:L)
+                neighbors = sys.lattice.neighbors[from]
+                to = rand(neighbors)
+
                 if n_old[from] > 0 && n_old[to] < n_max
                     n_new[from] -= 1
                     n_new[to] += 1
                     r = sampling_ratio(n_old, n_new, κ)
-                    # If the sampling ratio is greater than the random value, accept the move
                     if rand() < r
                         walkers[i] = n_new
                         num_accepted += 1
@@ -286,15 +283,15 @@ function VMC_fixed_particles(sys::System, κ::Real, n_max::Int, N_total::Int;
                     break
                 end
             end
+
             if !moved
                 num_failed_moves += 1
                 continue
             end
-            # Make measurement if system equilibrated
+
             if step > num_equil_steps
                 ψ = generate_coefficients(walkers[i], κ)
                 E = local_energy(walkers[i], ψ, sys)
-                # Only accept finite energies
                 if isfinite(E)
                     energies[idx] = E
                     idx += 1
@@ -310,6 +307,15 @@ function VMC_fixed_particles(sys::System, κ::Real, n_max::Int, N_total::Int;
     return VMCResults(mean_energy, sem_energy, acceptance_ratio, energies, num_failed_moves)
 end
 
+
+#=
+Purpose: run the VMC function for either a 1D or 2D lattice
+Input: sys (system struct), κ (variational parameter), n_max (maximum number of particles on a given site), N_total (total number of particles)
+Optional Input: num_walkers, num_MC_steps, num_equil_steps (kwargs...)
+Output: result from VMC_fixed_particles
+Author: Will Mallah
+Last Updated: 07/04/25
+=#
 function run_vmc(sys::System, κ::Real, n_max::Int; kwargs...)
     lattice = sys.lattice
     if lattice isa Lattice1D
