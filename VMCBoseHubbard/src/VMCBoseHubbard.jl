@@ -120,7 +120,8 @@ To-Do:
 function generate_coefficients(n::Vector{Int}, κ::Real)
     L = length(n)
     n_max = maximum(n) + 2
-    f = zeros(Float64, n_max, L)
+    f = zeros(Float64, n_max + 1, L)  # extra padding
+
     for i in 1:L
         for ni in 0:(n_max - 1)
             f[ni+1, i] = (1 / sqrt(factorial(ni))) * exp(-κ * ni^2 / 2.0)
@@ -148,50 +149,59 @@ end
 
 #=
 Purpose: calculate the local energy
-Input: n (vector of integers describing the system state), ψ (wavefunction struct), sys (system struct)
+Input: n (vector of integers describing the system state), ψ (wavefunction struct), sys (system struct), n_max (maximum number of particles on a given site)
 Output: total local energy (kinetic + potential)
 Author: Will Mallah
-Last Updated: 07/04/25
+Last Updated: 07/08/25
 To-Do: 
 =#
-function local_energy(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::System)
+function local_energy(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::System, n_max::Int)
     f = ψ.f
-    lattice = sys.lattice
     t, U = sys.t, sys.U
+    lattice = sys.lattice
     L = length(n)
-    E_kin, E_pot = 0.0, 0.0
-    for i in eachindex(n)
-        E_pot += (U/2) * n[i] * (n[i] - 1)
+
+    E_kin = 0.0
+    E_pot = 0.0
+
+    # Normalize each site's amplitudes: Zᵢ = ∑ₙ |fₙ|²
+    Z = [sum(abs2(f[m + 1, i]) for m in 0:n_max) for i in 1:L]
+
+    # Potential energy term
+    for i in 1:L
+        E_pot += (U / 2) * n[i] * (n[i] - 1)
     end
-    for i in eachindex(n)
+
+    # Kinetic energy term
+    for i in 1:L
         for j in lattice.neighbors[i]
-            if j > i  # visit each pair once
-                # hop j → i
-                if hop_possible(n, j, i, f)
-                    R = f[n[i]+2, i] * f[n[j], j] / (f[n[i]+1, i] * f[n[j]+1, j])
-                    E_kin += -t * sqrt((n[i]+1) * n[j]) * R
-                end
-                # hop i → j
-                if hop_possible(n, i, j, f)
-                    R = f[n[j]+2, j] * f[n[i], i] / (f[n[j]+1, j] * f[n[i]+1, i])
-                    E_kin += -t * sqrt((n[j]+1) * n[i]) * R
-                end
+            if hop_possible(n, j, i, f)
+                R1 = f[n[i] + 2, i] * f[n[j] + 1, j] / (f[n[i] + 1, i] * f[n[j] + 2, j])
+                R1 /= sqrt(Z[i] * Z[j])
+                E_kin += -t * sqrt((n[i] + 1) * n[j]) * R1
+            end
+            if hop_possible(n, i, j, f)
+                R2 = f[n[j] + 2, j] * f[n[i] + 1, i] / (f[n[j] + 1, j] * f[n[i] + 2, i])
+                R2 /= sqrt(Z[j] * Z[i])
+                E_kin += -t * sqrt((n[j] + 1) * n[i]) * R2
             end
         end
     end
 
+
     return E_kin + E_pot
 end
 
+
 #=
 Purpose: calculate the sampling ratio
-Input: n_old (old state of system), n_new (new state of the system), κ (variational parameter)
+Input: n_old (old state of system), n_new (new state of the system), κ (variational parameter), n_max (maximum number of particles on a given site)
 Output: sampling ratio between two system states
 Author: Will Mallah
 Last Updated: 07/04/25
 To-Do: 
 =#
-function sampling_ratio(n_old::Vector{Int}, n_new::Vector{Int}, κ::Real)
+function sampling_ratio(n_old::Vector{Int}, n_new::Vector{Int}, κ::Real, n_max::Int)
     ratio = 1.0
     for i in eachindex(n_old)
         if n_old[i] != n_new[i]
@@ -202,6 +212,7 @@ function sampling_ratio(n_old::Vector{Int}, n_new::Vector{Int}, κ::Real)
     end
     return ratio
 end
+
 
 #=
 Purpose: generate initial system states where the particle number on any given site does not exceed n_max
@@ -274,7 +285,7 @@ function VMC_fixed_particles(sys::System, κ::Real, n_max::Int, N_total::Int;
                 if n_old[from] > 0 && n_old[to] < n_max
                     n_new[from] -= 1
                     n_new[to] += 1
-                    r = sampling_ratio(n_old, n_new, κ)
+                    r = sampling_ratio(n_old, n_new, κ, n_max)
                     if rand() < r
                         walkers[i] = n_new
                         num_accepted += 1
@@ -291,7 +302,7 @@ function VMC_fixed_particles(sys::System, κ::Real, n_max::Int, N_total::Int;
 
             if step > num_equil_steps
                 ψ = generate_coefficients(walkers[i], κ)
-                E = local_energy(walkers[i], ψ, sys)
+                E = local_energy(walkers[i], ψ, sys, n_max)
                 if isfinite(E)
                     energies[idx] = E
                     idx += 1
@@ -316,12 +327,12 @@ Output: result from VMC_fixed_particles
 Author: Will Mallah
 Last Updated: 07/04/25
 =#
-function run_vmc(sys::System, κ::Real, n_max::Int; kwargs...)
+function run_vmc(sys::System, κ::Real, n_max::Int, N_total::Int; kwargs...)
     lattice = sys.lattice
     if lattice isa Lattice1D
-        return VMC_fixed_particles(sys, κ, n_max, lattice.L; kwargs...)
+        return VMC_fixed_particles(sys, κ, n_max, N_total; kwargs...)
     elseif lattice isa Lattice2D
-        return VMC_fixed_particles(sys, κ, n_max, lattice.Lx * lattice.Ly; kwargs...)
+        return VMC_fixed_particles(sys, κ, n_max, N_total; kwargs...)
     else
         error("Unsupported lattice type: $(typeof(lattice))")
     end
