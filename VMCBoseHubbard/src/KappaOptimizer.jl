@@ -22,14 +22,18 @@ function optimize_kappa(sys::System; N_total, kwargs...)
         end
 
         try
-            n_max = estimate_n_max(κ)
+            n_est = estimate_n_max(κ)
 
-            if n_max < 3 || n_max > 30
+            # Reject truly problematic values
+            if n_est < 2 || n_est > 100
                 push!(rejected_kappas, κ)
-                push!(rejected_nmax, n_max)
-                @warn "Rejected κ = $κ due to estimate_n_max = $n_max"
+                push!(rejected_nmax, n_est)
+                @warn "Rejected κ = $κ due to estimate_n_max = $n_est"
                 return Inf
             end
+
+            # Clamp borderline values
+            n_max = clamp(n_est, 1, 30)
 
             result = run_vmc(sys, κ, n_max, N_total; kwargs...)
             E = result.mean_energy
@@ -49,6 +53,7 @@ function optimize_kappa(sys::System; N_total, kwargs...)
         end
     end
 
+
     Random.seed!(42)
 
     println("🌍 Starting global optimization (Simulated Annealing)...")
@@ -61,9 +66,16 @@ function optimize_kappa(sys::System; N_total, kwargs...)
     println("🌍 SA result: κ = $global_kappa, E = $(global_result.minimum)")
 
     println("\n🔍 Starting local refinement from SA result...")
-    lower_bound = 0.5
-    upper_bound = 2.0
-    initial_kappa = clamp(global_kappa, lower_bound, upper_bound)
+    # Adaptive bounding based on SA result
+    margin = 0.5
+    lower_bound = max(global_kappa - margin, 1e-4)  # ensure positive bound
+    upper_bound = global_kappa + margin
+    initial_kappa = global_kappa
+
+    if upper_bound - lower_bound < 1e-3
+        upper_bound += 0.1
+        lower_bound = max(lower_bound - 0.1, 1e-4)
+    end
 
     local_result = optimize(x -> energy_for_kappa_logged(x, sys; kwargs...),
                             [lower_bound], [upper_bound],

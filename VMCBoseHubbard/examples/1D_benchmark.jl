@@ -32,7 +32,7 @@ for i in eachindex(U)
     # println("κ = $result.kappa: E = $result.energy ± $result.sem")
 end
 
-open("../data/results.dat", "w") do io
+open("../data/1D_VMC_results.dat", "w") do io
     println(io, "# U   kappa   energy   sem")
     for (u, r) in zip(U, results)
         println(io, "$u $(r.kappa) $(r.energy) $(r.sem)")

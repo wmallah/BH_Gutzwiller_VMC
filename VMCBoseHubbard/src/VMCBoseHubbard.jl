@@ -1,10 +1,7 @@
 
 module VMCBoseHubbard
 
-using Random
-using Distributions
-using ProgressMeter
-using Statistics
+using Random, Statistics, ProgressMeter
 
 export Lattice1D, Lattice2D, System, run_vmc, VMCResults, estimate_n_max
 
@@ -23,6 +20,7 @@ struct Lattice1D <: AbstractLattice
     L::Int
     neighbors::Vector{Vector{Int}}
 end
+
 
 #=
 Purpose: generate lattice for 1D system
@@ -49,6 +47,7 @@ function Lattice1D(L::Int; periodic::Bool=true)
     end
 end
 
+
 #=
 Purpose: store information about 2D lattice
 Input: Lx, Ly, list of neighbors
@@ -60,6 +59,7 @@ struct Lattice2D <: AbstractLattice
     Ly::Int
     neighbors::Vector{Vector{Int}}
 end
+
 
 #=
 Purpose: generate lattice for 2D system
@@ -75,10 +75,10 @@ function Lattice2D(Lx::Int, Ly::Int; periodic::Bool=true)
         site(x, y) = (mod1(x, Lx) - 1) + (mod1(y, Ly) - 1) * Lx + 1
         for y in 1:Ly, x in 1:Lx
             i = site(x, y)
-            if periodic || x < Lx; push!(neighbors[i], site(x+1, y)); end
-            if periodic || x > 1;  push!(neighbors[i], site(x-1, y)); end
-            if periodic || y < Ly; push!(neighbors[i], site(x, y+1)); end
-            if periodic || y > 1;  push!(neighbors[i], site(x, y-1)); end
+            if x < Lx; push!(neighbors[i], site(x+1, y)); end
+            if x > 1;  push!(neighbors[i], site(x-1, y)); end
+            if y < Ly; push!(neighbors[i], site(x, y+1)); end
+            if y > 1;  push!(neighbors[i], site(x, y-1)); end
         end
         return Lattice2D(Lx, Ly, neighbors)
     else
@@ -100,14 +100,17 @@ struct System{T <: Real}
     lattice::AbstractLattice
 end
 
+
 # Keeps storage dense by always ensuring that f is a Matrix(T)
 struct GutzwillerWavefunction{T <: Real} <: Wavefunction
     f::Matrix{T}
 end
 
+
 # Allows acceptance of any AbstractMatrix{<:Real}
 GutzwillerWavefunction(f::AbstractMatrix{<:Real}) =
     GutzwillerWavefunction{eltype(f)}(Matrix(f))
+
 
 #=
 Purpose: generate coefficients of the Gutzwiller variational wavefunction
@@ -119,7 +122,7 @@ To-Do:
 =#
 function generate_coefficients(n::Vector{Int}, κ::Real)
     L = length(n)
-    n_max = maximum(n) + 2
+    n_max = maximum(n) + 3
     f = zeros(Float64, n_max + 1, L)  # extra padding
 
     for i in 1:L
@@ -129,6 +132,7 @@ function generate_coefficients(n::Vector{Int}, κ::Real)
     end
     return GutzwillerWavefunction(f)
 end
+
 
 #=
 Purpose: determine if a hop between sites is possible
@@ -147,13 +151,14 @@ function hop_possible(n::Vector{Int}, from::Int, to::Int, f::Matrix{<:Real})
            n_from > 0
 end
 
+
 #=
 Purpose: calculate the local energy
 Input: n (vector of integers describing the system state), ψ (wavefunction struct), sys (system struct), n_max (maximum number of particles on a given site)
 Output: total local energy (kinetic + potential)
 Author: Will Mallah
 Last Updated: 07/08/25
-To-Do: 
+    Summary: implemented normalization 
 =#
 function local_energy(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::System, n_max::Int)
     f = ψ.f
@@ -175,20 +180,25 @@ function local_energy(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::System, n
     # Kinetic energy term
     for i in 1:L
         for j in lattice.neighbors[i]
-            if hop_possible(n, j, i, f)
-                R1 = f[n[i] + 2, i] * f[n[j] + 1, j] / (f[n[i] + 1, i] * f[n[j] + 2, j])
-                R1 /= sqrt(Z[i] * Z[j])
-                E_kin += -t * sqrt((n[i] + 1) * n[j]) * R1
-            end
-            if hop_possible(n, i, j, f)
-                R2 = f[n[j] + 2, j] * f[n[i] + 1, i] / (f[n[j] + 1, j] * f[n[i] + 2, i])
-                R2 /= sqrt(Z[j] * Z[i])
-                E_kin += -t * sqrt((n[j] + 1) * n[i]) * R2
+            if j > i
+                # hop j → i
+                if hop_possible(n, j, i, f) && n[i] + 1 < size(f, 1) && n[j] > 0
+                    num = f[n[i]+2, i] * f[n[j], j]
+                    den = f[n[i]+1, i] * f[n[j]+1, j]
+                    R1 = num / den / sqrt(Z[i] * Z[j])
+                    E_kin += -t * sqrt((n[i]+1) * n[j]) * R1
+                end
+
+                # hop i → j
+                if hop_possible(n, i, j, f) && n[j] + 1 < size(f, 1) && n[i] > 0
+                    num = f[n[j]+2, j] * f[n[i], i]
+                    den = f[n[j]+1, j] * f[n[i]+1, i]
+                    R2 = num / den / sqrt(Z[j] * Z[i])
+                    E_kin += -t * sqrt((n[j]+1) * n[i]) * R2
+                end
             end
         end
     end
-
-
     return E_kin + E_pot
 end
 
@@ -199,7 +209,6 @@ Input: n_old (old state of system), n_new (new state of the system), κ (variati
 Output: sampling ratio between two system states
 Author: Will Mallah
 Last Updated: 07/04/25
-To-Do: 
 =#
 function sampling_ratio(n_old::Vector{Int}, n_new::Vector{Int}, κ::Real, n_max::Int)
     ratio = 1.0
@@ -234,6 +243,7 @@ function initialize_fixed_particles(L::Int, N::Int, n_max::Int)
     return config
 end
 
+
 #=
 Purpose: store information about the VMC results
 Input: mean energy, standard deviation of the mean, acceptance ratio, vector of energies, number of failed moves
@@ -247,6 +257,7 @@ struct VMCResults
     energies::Vector{Float64}
     num_failed_moves::Int
 end
+
 
 #=
 Purpose: perform variational Monte Carlo to integrate the local energy
@@ -338,7 +349,14 @@ function run_vmc(sys::System, κ::Real, n_max::Int, N_total::Int; kwargs...)
     end
 end
 
-# Function to estimate value for n_max given kappa parameter and cutoff value for decay of Gutzwiller coefficients
+
+#=
+Purpose: estimate value for n_max given kappa parameter and cutoff value for decay of Gutzwiller coefficients
+Input: kappa (variational parameter), cutoff (value for coefficient deemed insignificant)
+Output: particle number where Gutzwiller coefficients are significant
+Author: Will Mallah
+Last Updated: 07/04/25
+=#
 function estimate_n_max(κ::Real; cutoff::Real = 1e-6)
     n = 0
     while true
