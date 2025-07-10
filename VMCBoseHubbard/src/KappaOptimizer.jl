@@ -60,28 +60,32 @@ function optimize_kappa(sys::System; N_total, kwargs...)
     global_result = optimize(x -> energy_for_kappa_logged(x, sys; kwargs...),
                              [1.0],
                              SimulatedAnnealing(),
-                             Optim.Options(iterations = 10, show_trace = true))
+                             Optim.Options(iterations = 100, show_trace = false))
 
     global_kappa = global_result.minimizer[1]
     println("🌍 SA result: κ = $global_kappa, E = $(global_result.minimum)")
 
     println("\n🔍 Starting local refinement from SA result...")
     # Adaptive bounding based on SA result
-    margin = 0.5
-    lower_bound = max(global_kappa - margin, 1e-4)  # ensure positive bound
-    upper_bound = global_kappa + margin
-    initial_kappa = global_kappa
+    # margin = 0.1
+    # lower_bound = max(global_kappa - margin, 1e-4)  # ensure positive bound
+    # upper_bound = global_kappa + margin
+    # initial_kappa = global_kappa
 
-    if upper_bound - lower_bound < 1e-3
-        upper_bound += 0.1
-        lower_bound = max(lower_bound - 0.1, 1e-4)
-    end
+    # if upper_bound - lower_bound < 1e-3
+    #     upper_bound += 0.1
+    #     lower_bound = max(lower_bound - 0.1, 1e-4)
+    # end
+
+    lower_bound = 0.1
+    upper_bound = 2.5
+    initial_kappa = global_kappa
 
     local_result = optimize(x -> energy_for_kappa_logged(x, sys; kwargs...),
                             [lower_bound], [upper_bound],
                             [initial_kappa],
                             Fminbox(NelderMead()),
-                            Optim.Options(iterations = 10, show_trace = true))
+                            Optim.Options(iterations = 100, show_trace = false))
 
     refined_kappa = local_result.minimizer[1]
     refined_energy = local_result.minimum

@@ -3,8 +3,10 @@ module VMCBoseHubbard
 
 using Random, Statistics, ProgressMeter
 
+# Explicitly export all functions and structs that are called in other files
 export Lattice1D, Lattice2D, System, run_vmc, VMCResults, estimate_n_max
 
+# Create abstract types for both the lattice and wavefunctions so we can 
 abstract type AbstractLattice end
 abstract type Wavefunction end
 
