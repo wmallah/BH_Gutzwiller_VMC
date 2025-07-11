@@ -2,9 +2,10 @@
 module VMCBoseHubbard
 
 using Random, Statistics, ProgressMeter
+using Polynomials
 
 # Explicitly export all functions and structs that are called in other files
-export Lattice1D, Lattice2D, System, run_vmc, VMCResults, estimate_n_max
+export Lattice1D, Lattice2D, System, run_vmc, VMCResults, estimate_n_max, optimize_kappa_grid_scan
 
 # Create abstract types for both the lattice and wavefunctions so we can 
 abstract type AbstractLattice end
@@ -362,7 +363,7 @@ Last Updated: 07/04/25
 function estimate_n_max(κ::Real; cutoff::Real = 1e-6)
     n = 0
     while true
-        f_n = (1 / sqrt(factorial(n))) * exp(-κ * n^2 / 2)
+        f_n = (1 / sqrt(float(factorial(big(n))))) * exp(-κ * n^2 / 2)
         if f_n < cutoff
             return n - 1  # previous n was last significant
         end
@@ -373,4 +374,64 @@ function estimate_n_max(κ::Real; cutoff::Real = 1e-6)
     end
 end
 
+
+"""
+    optimize_kappa_grid_scan(sys::System, N_total::Int; kwargs...) -> NamedTuple
+
+Perform a brute-force grid scan over κ to minimize the VMC energy.
+
+Returns a NamedTuple: (kappa, energy, sem)
+"""
+function optimize_kappa_grid_scan(sys::System, N_total::Int;
+        κ_range = 0.4:0.05:2.0,
+        num_walkers = 300,
+        num_MC_steps = 3000,
+        num_equil_steps = 500,
+        final_walkers = 1000,
+        final_steps = 10000,
+        final_equil = 2000
+    )
+
+    valid_kappas = Float64[]
+    energies = Float64[]
+
+    for κ in κ_range
+        try
+            n_max = estimate_n_max(κ)
+            result = run_vmc(sys, κ, n_max, N_total;
+                            num_walkers=num_walkers,
+                            num_MC_steps=num_MC_steps,
+                            num_equil_steps=num_equil_steps)
+            push!(valid_kappas, κ)
+            push!(energies, result.mean_energy)
+        catch e
+            @warn "Skipping κ=$κ: $e"
+        end
+    end
+
+    # Check we have sufficient points
+    if length(valid_kappas) < 3
+        error("Not enough valid data points to fit a quadratic polynomial.")
+    end
+
+    # Fit quadratic polynomial: E(κ) ≈ a κ² + b κ + c
+    p = fit(valid_kappas, energies, 2)
+    a, b = coeffs(p)[3], coeffs(p)[2]  # Note: coeffs are ordered [c, b, a]
+
+    # Analytic minimum: κ = -b / (2a)
+    κ_fit = -b / (2a)
+    κ_opt = clamp(κ_fit, minimum(valid_kappas), maximum(valid_kappas))
+
+    # Final evaluation with more samples
+    n_max_final = estimate_n_max(κ_opt)
+    final_result = run_vmc(sys, κ_opt, n_max_final, N_total;
+                        num_walkers=final_walkers,
+                        num_MC_steps=final_steps,
+                        num_equil_steps=final_equil)
+
+    return (kappa = κ_opt,
+            energy = final_result.mean_energy,
+            sem = final_result.sem_energy)
 end
+
+end     # module
