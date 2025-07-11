@@ -7,8 +7,8 @@ using Printf
 
 # System constants
 L = 12
-Lx, Ly = 2, 2
-N_total = 12
+Lx, Ly = 4, 4
+N_total = 16
 _1D = false
 t = 1.0
 U_vals = 1.0:1.0:10.0

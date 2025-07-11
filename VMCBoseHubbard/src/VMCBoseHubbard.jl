@@ -73,21 +73,31 @@ Last Updated: 07/04/25
 To-Do: implement open boundary conditions
 =#
 function Lattice2D(Lx::Int, Ly::Int; periodic::Bool=true)
-    if periodic
-        neighbors = [Int[] for _ in 1:(Lx * Ly)]
-        site(x, y) = (mod1(x, Lx) - 1) + (mod1(y, Ly) - 1) * Lx + 1
-        for y in 1:Ly, x in 1:Lx
-            i = site(x, y)
-            if x < Lx; push!(neighbors[i], site(x+1, y)); end
-            if x > 1;  push!(neighbors[i], site(x-1, y)); end
-            if y < Ly; push!(neighbors[i], site(x, y+1)); end
-            if y > 1;  push!(neighbors[i], site(x, y-1)); end
+    neighbors = [Int[] for _ in 1:(Lx * Ly)]
+
+    site(x, y) = (mod1(x, Lx) - 1) + (mod1(y, Ly) - 1) * Lx + 1
+
+    for y in 1:Ly, x in 1:Lx
+        i = site(x, y)
+
+        for (dx, dy) in ((1, 0), (-1, 0), (0, 1), (0, -1))  # right, left, up, down
+            x2, y2 = x + dx, y + dy
+
+            if periodic || (1 ≤ x2 ≤ Lx && 1 ≤ y2 ≤ Ly)
+                j = site(x2, y2)
+                if j ∉ neighbors[i]
+                    push!(neighbors[i], j)
+                end
+                if i ∉ neighbors[j]
+                    push!(neighbors[j], i)
+                end
+            end
         end
-        return Lattice2D(Lx, Ly, neighbors)
-    else
-        error("Open boundary conditions for Lattice2D are not implemented yet.")
     end
+
+    return Lattice2D(Lx, Ly, neighbors)
 end
+
 
 # ─── System and Wavefunction ───────────────────────────────
 
