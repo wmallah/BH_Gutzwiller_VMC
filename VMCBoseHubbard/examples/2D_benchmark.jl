@@ -6,8 +6,8 @@ using .KappaOptimizer
 
 const BH = KappaOptimizer.VMCBoseHubbard
 
-Lx, Ly = 2, 2
-N = 4
+Lx, Ly = 4, 4
+N = 16
 t = 1.0
 U = [i for i in 1.0:10.0]
 

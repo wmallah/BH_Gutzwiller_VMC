@@ -290,6 +290,20 @@ function VMC_fixed_particles(sys::System, κ::Real, n_max::Int, N_total::Int;
 
     L = length(sys.lattice.neighbors)
     walkers = [initialize_fixed_particles(L, N_total, n_max) for _ in 1:num_walkers]
+
+    # 🔥 Pre-shuffle ("hot start") to break symmetry and avoid frozen configs
+    num_hot_sweeps = 1000
+    for _ in 1:num_hot_sweeps
+        for w in walkers
+            from, to = rand(1:L), rand(1:L)
+            if from != to && w[from] > 0 && w[to] < n_max
+                w[from] -= 1
+                w[to] += 1
+            end
+        end
+    end
+    # println("🔥 Completed hot start shuffling of walkers")
+
     energies = zeros(Float64, num_walkers * (num_MC_steps - num_equil_steps))
     idx = 1
     num_accepted = 0
@@ -300,22 +314,64 @@ function VMC_fixed_particles(sys::System, κ::Real, n_max::Int, N_total::Int;
             n_old = walkers[i]
             n_new = copy(n_old)
             moved = false
+            attempt_global = rand() < 0.1  # 10% chance of global hop
 
-            for attempt in 1:20
-                from = rand(1:L)
-                neighbors = sys.lattice.neighbors[from]
-                to = rand(neighbors)
+            sites = shuffle(1:L)
 
-                if n_old[from] > 0 && n_old[to] < n_max
-                    n_new[from] -= 1
-                    n_new[to] += 1
-                    r = sampling_ratio(n_old, n_new, κ, n_max)
-                    if rand() < r
-                        walkers[i] = n_new
-                        num_accepted += 1
+            if attempt_global
+                # Global move: allow hops between any two sites
+                for from in sites
+                    if n_old[from] == 0
+                        continue
                     end
-                    moved = true
-                    break
+                    for to in shuffle(1:L)
+                        if to == from || n_old[to] >= n_max
+                            continue
+                        end
+
+                        n_new[from] -= 1
+                        n_new[to] += 1
+                        r = sampling_ratio(n_old, n_new, κ, n_max)
+
+                        if rand() < r
+                            walkers[i] = n_new
+                            num_accepted += 1
+                        end
+
+                        moved = true
+                        break
+                    end
+                    if moved
+                        break
+                    end
+                end
+
+            else
+                # Standard local hop: neighbors only
+                for from in sites
+                    if n_old[from] == 0
+                        continue
+                    end
+                    for to in shuffle(sys.lattice.neighbors[from])
+                        if n_old[to] >= n_max
+                            continue
+                        end
+
+                        n_new[from] -= 1
+                        n_new[to] += 1
+                        r = sampling_ratio(n_old, n_new, κ, n_max)
+
+                        if rand() < r
+                            walkers[i] = n_new
+                            num_accepted += 1
+                        end
+
+                        moved = true
+                        break
+                    end
+                    if moved
+                        break
+                    end
                 end
             end
 
@@ -333,6 +389,11 @@ function VMC_fixed_particles(sys::System, κ::Real, n_max::Int, N_total::Int;
                 end
             end
         end
+    end
+
+    if isempty(energies)
+        @warn "No valid energy samples collected! Returning Inf energy."
+        return VMCResults(Inf, Inf, 0.0, Float64[], num_failed_moves)
     end
 
     mean_energy = mean(energies)
@@ -375,73 +436,13 @@ function estimate_n_max(κ::Real; cutoff::Real = 1e-6)
     while true
         f_n = (1 / sqrt(float(factorial(big(n))))) * exp(-κ * n^2 / 2)
         if f_n < cutoff
-            return n - 1  # previous n was last significant
+            return n - 1
         end
         n += 1
-        if n > 1000
-            error("κ too small or cutoff too strict — did not converge")
+        if n > 300  # reduced from 1000
+            return 300  # instead of error
         end
     end
-end
-
-
-"""
-    optimize_kappa_grid_scan(sys::System, N_total::Int; kwargs...) -> NamedTuple
-
-Perform a brute-force grid scan over κ to minimize the VMC energy.
-
-Returns a NamedTuple: (kappa, energy, sem)
-"""
-function optimize_kappa_grid_scan(sys::System, N_total::Int;
-        κ_range = 0.4:0.05:2.0,
-        num_walkers = 300,
-        num_MC_steps = 3000,
-        num_equil_steps = 500,
-        final_walkers = 1000,
-        final_steps = 10000,
-        final_equil = 2000
-    )
-
-    valid_kappas = Float64[]
-    energies = Float64[]
-
-    for κ in κ_range
-        try
-            n_max = estimate_n_max(κ)
-            result = run_vmc(sys, κ, n_max, N_total;
-                            num_walkers=num_walkers,
-                            num_MC_steps=num_MC_steps,
-                            num_equil_steps=num_equil_steps)
-            push!(valid_kappas, κ)
-            push!(energies, result.mean_energy)
-        catch e
-            @warn "Skipping κ=$κ: $e"
-        end
-    end
-
-    # Check we have sufficient points
-    if length(valid_kappas) < 3
-        error("Not enough valid data points to fit a quadratic polynomial.")
-    end
-
-    # Fit quadratic polynomial: E(κ) ≈ a κ² + b κ + c
-    p = fit(valid_kappas, energies, 2)
-    a, b = coeffs(p)[3], coeffs(p)[2]  # Note: coeffs are ordered [c, b, a]
-
-    # Analytic minimum: κ = -b / (2a)
-    κ_fit = -b / (2a)
-    κ_opt = clamp(κ_fit, minimum(valid_kappas), maximum(valid_kappas))
-
-    # Final evaluation with more samples
-    n_max_final = estimate_n_max(κ_opt)
-    final_result = run_vmc(sys, κ_opt, n_max_final, N_total;
-                        num_walkers=final_walkers,
-                        num_MC_steps=final_steps,
-                        num_equil_steps=final_equil)
-
-    return (kappa = κ_opt,
-            energy = final_result.mean_energy,
-            sem = final_result.sem_energy)
 end
 
 end     # module
