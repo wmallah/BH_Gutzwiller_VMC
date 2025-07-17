@@ -2,10 +2,10 @@
 module VMCBoseHubbard
 
 using Random, Statistics, ProgressMeter
-using Polynomials
+using SpecialFunctions: loggamma
 
 # Explicitly export all functions and structs that are called in other files
-export Lattice1D, Lattice2D, System, run_vmc, VMCResults, estimate_n_max, optimize_kappa_grid_scan
+export Lattice1D, Lattice2D, System, run_vmc, VMCResults, VMC_grand_canonical_adaptive_mu, estimate_n_max, find_mu_for_N_target, tune_mu_and_log
 
 # Create abstract types for both the lattice and wavefunctions so we can 
 abstract type AbstractLattice end
@@ -114,37 +114,30 @@ struct System{T <: Real}
 end
 
 
-# Keeps storage dense by always ensuring that f is a Matrix(T)
-struct GutzwillerWavefunction{T <: Real} <: Wavefunction
-    f::Matrix{T}
-end
-
-
-# Allows acceptance of any AbstractMatrix{<:Real}
-GutzwillerWavefunction(f::AbstractMatrix{<:Real}) =
-    GutzwillerWavefunction{eltype(f)}(Matrix(f))
-
-
 #=
 Purpose: generate coefficients of the Gutzwiller variational wavefunction
-Input: n (vector of integers describing the system state), kappa (variational parameter)
-Output: struct of Gutzwiller Wavefunction containing coefficients for a given system state
+Input: n (vector of integers describing the system state), kappa (variational parameter), n_max (maximum number of particles on a given site)
+Output: struct of Gutzwiller Wavefunction containing coefficients and normalization
 Author: Will Mallah
-Last Updated: 07/04/25
-To-Do: 
+Last Updated: 07/16/25
+    Summary: Since coefficient are globally the same, generate them as a vector rather than matrix to reduce number of computations and confusion around indexing
 =#
-function generate_coefficients(n::Vector{Int}, κ::Real)
-    L = length(n)
-    n_max = maximum(n) + 3
-    f = zeros(Float64, n_max + 1, L)  # extra padding
+const LOGFACTORIAL_TABLE = [loggamma(m + 1) for m in 0:100]  # supports up to n_max=100
 
-    for i in 1:L
-        for ni in 0:(n_max - 1)
-            f[ni+1, i] = (1 / sqrt(factorial(ni))) * exp(-κ * ni^2 / 2.0)
-        end
-    end
-    return GutzwillerWavefunction(f)
+function generate_coefficients(n::Vector{Int}, κ::Real, n_max::Int; logfact=LOGFACTORIAL_TABLE)
+    n_cutoff = max(n_max + 2, maximum(n) + 2)   
+    f = [exp(-κ * m^2 / 2.0 - 0.5 * logfact[m + 1]) for m in 0:n_cutoff]
+    Z = sum(abs2, f)
+    # println("Z = $Z")
+    return GutzwillerWavefunction(f, Z)
 end
+
+
+struct GutzwillerWavefunction{T <: Real} <: Wavefunction
+    f::Vector{T}
+    Z::T
+end
+
 
 
 #=
@@ -155,13 +148,16 @@ Author: Will Mallah
 Last Updated: 07/04/25
 To-Do: 
 =#
-function hop_possible(n::Vector{Int}, from::Int, to::Int, f::Matrix{<:Real})
-    n_from, n_to = n[from], n[to]
-    n_max = size(f, 1) - 1
-    L = size(f, 2)
-    return 1 ≤ from ≤ L && 1 ≤ to ≤ L &&
-           0 ≤ n_from ≤ n_max && 0 ≤ n_to < n_max &&
-           n_from > 0
+function hop_possible(n::Vector{Int}, from::Int, to::Int, f::Vector{<:Real})
+    L = length(n)
+    n_max = length(f) - 1
+    n_from = n[from]
+    n_to = n[to]
+
+    return 1 ≤ from ≤ L &&
+           1 ≤ to ≤ L &&
+           n_from > 0 &&
+           n_to < n_max
 end
 
 
@@ -173,7 +169,51 @@ Author: Will Mallah
 Last Updated: 07/08/25
     Summary: implemented normalization 
 =#
-function local_energy(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::System, n_max::Int)
+function local_energy(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::System; μ::Real = 0)
+    f = ψ.f                     # shared Gutzwiller coefficient vector
+    t, U = sys.t, sys.U
+    lattice = sys.lattice
+    L = length(n)
+
+    E_kin = 0.0
+    E_pot = 0.0
+
+    # Potential energy term
+    for i in 1:L
+        E_pot += (U / 2) * n[i] * (n[i] - 1)    # no need for f-dependent term; cancels in ratio
+    end
+
+    # Kinetic energy term
+    for i in 1:L
+        for j in lattice.neighbors[i]
+            if j > i
+                # hop j → i
+                if hop_possible(n, j, i, f)
+                    num = f[n[i]+2] * f[n[j]]
+                    den = f[n[i]+1] * f[n[j]+1]
+                    R1 = num / den / ψ.Z
+                    E_kin += -t * sqrt((n[i]+1) * n[j]) * R1
+                end
+
+                # hop i → j
+                if hop_possible(n, i, j, f)
+                    num = f[n[j]+2] * f[n[i]]
+                    den = f[n[j]+1] * f[n[i]+1]
+                    R2 = num / den / ψ.Z
+                    E_kin += -t * sqrt((n[j]+1) * n[i]) * R2
+                end
+            end
+        end
+    end
+
+    # Chemical potential correction
+    N = sum(n)
+
+    return E_kin + E_pot #- μ*N    # only add for true grand canonical simulations
+end
+
+
+function local_energy_parts(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::System)
     f = ψ.f
     t, U = sys.t, sys.U
     lattice = sys.lattice
@@ -182,37 +222,30 @@ function local_energy(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::System, n
     E_kin = 0.0
     E_pot = 0.0
 
-    # Normalize each site's amplitudes: Zᵢ = ∑ₙ |fₙ|²
-    Z = [sum(abs2(f[m + 1, i]) for m in 0:n_max) for i in 1:L]
-
-    # Potential energy term
     for i in 1:L
         E_pot += (U / 2) * n[i] * (n[i] - 1)
     end
 
-    # Kinetic energy term
     for i in 1:L
         for j in lattice.neighbors[i]
             if j > i
-                # hop j → i
-                if hop_possible(n, j, i, f) && n[i] + 1 < size(f, 1) && n[j] > 0
-                    num = f[n[i]+2, i] * f[n[j], j]
-                    den = f[n[i]+1, i] * f[n[j]+1, j]
-                    R1 = num / den / sqrt(Z[i] * Z[j])
+                if hop_possible(n, j, i, f)
+                    num = f[n[i]+2] * f[n[j]]
+                    den = f[n[i]+1] * f[n[j]+1]
+                    R1 = num / den / ψ.Z
                     E_kin += -t * sqrt((n[i]+1) * n[j]) * R1
                 end
-
-                # hop i → j
-                if hop_possible(n, i, j, f) && n[j] + 1 < size(f, 1) && n[i] > 0
-                    num = f[n[j]+2, j] * f[n[i], i]
-                    den = f[n[j]+1, j] * f[n[i]+1, i]
-                    R2 = num / den / sqrt(Z[j] * Z[i])
+                if hop_possible(n, i, j, f)
+                    num = f[n[j]+2] * f[n[i]]
+                    den = f[n[j]+1] * f[n[i]+1]
+                    R2 = num / den / ψ.Z
                     E_kin += -t * sqrt((n[j]+1) * n[i]) * R2
                 end
             end
         end
     end
-    return E_kin + E_pot
+
+    return E_kin, E_pot
 end
 
 
@@ -234,7 +267,6 @@ function sampling_ratio(n_old::Vector{Int}, n_new::Vector{Int}, κ::Real, n_max:
     end
     return ratio
 end
-
 
 #=
 Purpose: generate initial system states where the particle number on any given site does not exceed n_max
@@ -266,6 +298,10 @@ Last Updated: 07/04/25
 struct VMCResults
     mean_energy::Float64
     sem_energy::Float64
+    mean_kinetic::Float64
+    sem_kinetic::Float64
+    mean_potential::Float64
+    sem_potential::Float64
     acceptance_ratio::Float64
     energies::Vector{Float64}
     num_failed_moves::Int
@@ -278,8 +314,8 @@ Input: sys (system struct), κ (variational parameter), n_max (maximum number of
 Optional Input: num_walkers, num_MC_steps, num_equil_steps
 Output: struct of variational Monte Carlo results (see struct defined above)
 Author: Will Mallah
-Last Updated: 07/04/25
-To-Do: It seems like the code allows hopping between any two random sites but should only allow nearest neighbor hopping. However, this may not matter as were just sampling random system configurations as long as the total number of particles remains the same and the number of particles on any given site does not exceed n_max [CHECK]
+Last Updated: 07/16/25
+    Summary: Added hot start shuffling, global moves, and changed to generating coefficients outside of loop to avoid unnessecary calculations
 =#
 function VMC_fixed_particles(sys::System, κ::Real, n_max::Int, N_total::Int;
                              num_walkers::Int=200, num_MC_steps::Int=20000, num_equil_steps::Int=5000)
@@ -305,21 +341,25 @@ function VMC_fixed_particles(sys::System, κ::Real, n_max::Int, N_total::Int;
     # println("🔥 Completed hot start shuffling of walkers")
 
     energies = zeros(Float64, num_walkers * (num_MC_steps - num_equil_steps))
+    kinetic = Float64[]
+    potential = Float64[]
     idx = 1
     num_accepted = 0
     num_failed_moves = 0
+
+    ψ = generate_coefficients(fill(0, L), κ, n_max)  # Any dummy vector of length L works
 
     @showprogress enabled=true "Running VMC..." for step in 1:num_MC_steps
         for i in 1:num_walkers
             n_old = walkers[i]
             n_new = copy(n_old)
             moved = false
-            attempt_global = rand() < 0.1  # 10% chance of global hop
+            attempt_global = rand() < 0.1  # 10% chance of global hop [MAY REMOVE LATER IF NOT NEEDED]
 
             sites = shuffle(1:L)
 
             if attempt_global
-                # Global move: allow hops between any two sites
+                # Global move: allow hops between any two sites [MAY REMOVE LATER IF NOT NEEDED]
                 for from in sites
                     if n_old[from] == 0
                         continue
@@ -381,10 +421,12 @@ function VMC_fixed_particles(sys::System, κ::Real, n_max::Int, N_total::Int;
             end
 
             if step > num_equil_steps
-                ψ = generate_coefficients(walkers[i], κ)
-                E = local_energy(walkers[i], ψ, sys, n_max)
+                E = local_energy(walkers[i], ψ, sys)
+                T, V = local_energy_parts(walkers[i], ψ, sys)
                 if isfinite(E)
                     energies[idx] = E
+                    push!(kinetic, T)
+                    push!(potential, V)
                     idx += 1
                 end
             end
@@ -393,14 +435,206 @@ function VMC_fixed_particles(sys::System, κ::Real, n_max::Int, N_total::Int;
 
     if isempty(energies)
         @warn "No valid energy samples collected! Returning Inf energy."
-        return VMCResults(Inf, Inf, 0.0, Float64[], num_failed_moves)
+        return VMCResults(Inf, Inf, Inf, Inf, Inf, Inf, 0.0, Float64[], num_failed_moves)
     end
 
     mean_energy = mean(energies)
     sem_energy = std(energies) / sqrt(length(energies))
     acceptance_ratio = num_accepted / (num_MC_steps * num_walkers)
 
-    return VMCResults(mean_energy, sem_energy, acceptance_ratio, energies, num_failed_moves)
+    return VMCResults(mean_energy, sem_energy, mean_kinetic, sem_kinetic, mean_potential, sem_potential, acceptance_ratio, energies, num_failed_moves)
+end
+
+
+struct GrandCanonicalStats
+    mu_trace::Vector{Float64}
+    N_trace::Vector{Float64}
+    steps::Vector{Int}
+end
+
+
+#=
+Purpose: perform variational Monte Carlo to integrate the local energy for the grand canoical
+Input: sys (system struct), κ (variational parameter), n_max (maximum number of particles on a given site), N_target (target value for total number of particles), μ (initial guess for the chemical potential)
+Optional Input: η (chemical potential tuning rate), update_interval (how many steps between updating chemical potential), num_walkers, num_MC_steps, num_equil_steps
+Output: struct of variational Monte Carlo results (see struct defined above)
+Author: Will Mallah
+Last Updated: 07/16/25
+=#
+function VMC_grand_canonical_adaptive_mu(sys::System, κ::Real, n_max::Int, 
+                                          N_target::Real, μ::Real;
+                                          η::Real = 0.1,
+                                          μ_bounds::Tuple{Float64, Float64} = (-10.0, 10.0),
+                                          update_interval::Int = 500,
+                                          num_walkers::Int = 200,
+                                          num_MC_steps::Int = 30000,
+                                          num_equil_steps::Int = 5000)
+
+    L = length(sys.lattice.neighbors)
+    walkers = [zeros(Int, L) for _ in 1:num_walkers]
+
+    # Hot start
+    for _ in 1:1000
+        for w in walkers
+            site = rand(1:L)
+            if w[site] < n_max
+                w[site] += 1
+            end
+        end
+    end
+
+    ψ = generate_coefficients(fill(0, L), κ, n_max)
+    energies = Float64[]
+    kinetic = Float64[]
+    potential = Float64[]
+    total_N = Float64[]
+    num_accepted = 0
+    num_failed_moves = 0
+    acceptance_trace = Float64[]  # Optional: track over time
+
+    mu_trace = Float64[]
+    N_trace = Float64[]
+    steps = Int[]
+
+    @showprogress enabled=true "Running Grand Canonical VMC with adaptive μ..." for step in 1:num_MC_steps
+        for i in 1:num_walkers
+            n_old = walkers[i]
+            n_new = copy(n_old)
+
+            insert_sites = findall(n_old .< n_max)
+            remove_sites = findall(n_old .> 0)
+
+            ΔN = 0
+
+            total_moves = length(insert_sites) + length(remove_sites)
+            if total_moves == 0
+                continue  # no valid move
+            end
+
+            if rand() < length(insert_sites) / total_moves
+                site = rand(insert_sites)
+                n_new[site] += 1
+                ΔN = +1
+            else
+                site = rand(remove_sites)
+                n_new[site] -= 1
+                ΔN = -1
+            end
+
+            r = sampling_ratio(n_old, n_new, κ, n_max) * exp(μ * ΔN)
+
+            if rand() < r
+                walkers[i] = n_new
+                num_accepted += 1
+            else
+                num_failed_moves += 1
+                continue
+            end
+
+            if step > num_equil_steps
+                E = local_energy(walkers[i], ψ, sys; μ=μ)
+                T, V = local_energy_parts(walkers[i], ψ, sys)
+                if isfinite(E)
+                    push!(energies, E)
+                    push!(kinetic, T)
+                    push!(potential, V)
+                    push!(total_N, sum(walkers[i]))
+                end
+            end
+        end
+
+        if step % update_interval == 0 && step > num_equil_steps
+            avg_N = mean(total_N)
+            Δμ = η * (N_target - avg_N)
+            μ += tanh(Δμ) * η  # smooth response
+
+            # Optional clamping
+            μ = clamp(μ, μ_bounds[1], μ_bounds[2])
+
+            # Tracking
+            push!(mu_trace, μ)
+            push!(N_trace, avg_N)
+            push!(steps, step)
+
+            empty!(total_N)
+        end
+        acceptance = num_accepted / (num_accepted + num_failed_moves)
+        @debug "Step $step: acceptance ratio = $acceptance"
+        push!(acceptance_trace, acceptance)  # optional: store for later plotting
+    end
+
+    if isempty(energies)
+        @warn "No valid energy samples collected!"
+        return VMCResults(Inf, Inf, Inf, Inf, Inf, Inf, 0.0, Float64[], num_failed_moves),
+               GrandCanonicalStats(mu_trace, N_trace, steps)
+    end
+
+    mean_energy = mean(energies)
+    sem_energy = std(energies) / sqrt(length(energies))
+    mean_kinetic = mean(kinetic)
+    sem_kinetic = std(kinetic) / sqrt(length(kinetic))
+    mean_potential = mean(potential)
+    sem_potential = std(potential) / sqrt(length(potential))
+    acceptance_ratio = num_accepted / (num_MC_steps * num_walkers)
+
+    return VMCResults(mean_energy, sem_energy, mean_kinetic, sem_kinetic, mean_potential, sem_potential, acceptance_ratio, energies, num_failed_moves),
+           GrandCanonicalStats(mu_trace, N_trace, steps)
+end
+
+
+# ADD DOCUMENTATION HERE
+function find_mu_for_N_target(sys::System, κ::Real, n_max::Int, N_target::Real;
+                              η::Float64 = 0.01,
+                              μ_init::Float64 = 0.0,
+                              tune_steps::Int = 5000,
+                              walkers::Int = 200,
+                              update_interval::Int = 200)
+
+    _, stats = VMC_grand_canonical_adaptive_mu(sys, κ, n_max, N_target, μ_init;
+                                                η = η,
+                                                num_walkers = walkers,
+                                                num_MC_steps = tune_steps,
+                                                num_equil_steps = 0,
+                                                update_interval = update_interval)
+
+    return stats.mu_trace[end]  # final tuned value
+end
+
+
+"""
+    tune_mu_and_log(sys, κ, n_max, N_target; η=0.01, μ_init=1.0, tune_steps=5000, walkers=200, update_interval=200)
+
+Tunes the chemical potential μ to match N_target for a given κ and logs the μ and ⟨N⟩ evolution.
+
+Returns:
+  μ_final::Float64      — final tuned chemical potential
+  N_final::Float64      — corresponding particle number
+  stats::GrandCanonicalStats  — full tracking info
+"""
+function tune_mu_and_log(sys::System, κ::Real, n_max::Int, N_target::Real;
+                         η::Float64 = 0.01,
+                         μ_init::Float64 = 1.0,
+                         tune_steps::Int = 5000,
+                         walkers::Int = 200,
+                         update_interval::Int = 200)
+
+    println("🔧 Autotuning μ for κ = $κ to target N = $N_target")
+
+    _, stats = VMC_grand_canonical_adaptive_mu(sys, κ, n_max, N_target, μ_init;
+                                                η = η,
+                                                num_walkers = walkers,
+                                                num_MC_steps = tune_steps,
+                                                num_equil_steps = 0,
+                                                update_interval = update_interval)
+
+    # for (s, mu, N) in zip(stats.steps, stats.mu_trace, stats.N_trace)
+    #     println("  step = $s, μ = $mu, ⟨N⟩ = $N")
+    # end
+
+    μ_final = stats.mu_trace[end]
+    N_final = stats.N_trace[end]
+
+    return μ_final, N_final, stats
 end
 
 
@@ -412,14 +646,24 @@ Output: result from VMC_fixed_particles
 Author: Will Mallah
 Last Updated: 07/04/25
 =#
-function run_vmc(sys::System, κ::Real, n_max::Int, N_total::Int; kwargs...)
+function run_vmc(sys::System, κ::Real, n_max::Int, N_target::Int; grand_canonical=true, kwargs...)
     lattice = sys.lattice
-    if lattice isa Lattice1D
-        return VMC_fixed_particles(sys, κ, n_max, N_total; kwargs...)
-    elseif lattice isa Lattice2D
-        return VMC_fixed_particles(sys, κ, n_max, N_total; kwargs...)
+    if !grand_canonical
+        if lattice isa Lattice1D
+            return VMC_fixed_particles(sys, κ, n_max, N_target; kwargs...)
+        elseif lattice isa Lattice2D
+            return VMC_fixed_particles(sys, κ, n_max, N_target; kwargs...)
+        else
+            error("Unsupported lattice type: $(typeof(lattice))")
+        end
     else
-        error("Unsupported lattice type: $(typeof(lattice))")
+        if lattice isa Lattice1D
+            return VMC_grand_canonical_adaptive_mu(sys, κ, n_max, N_target, 1.0; kwargs...)
+        elseif lattice isa Lattice2D
+            return VMC_grand_canonical_adaptive_mu(sys, κ, n_max, N_target, 1.0; kwargs...)
+        else
+            error("Unsupported lattice type: $(typeof(lattice))")
+        end
     end
 end
 
