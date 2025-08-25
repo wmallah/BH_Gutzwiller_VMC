@@ -1,16 +1,3 @@
-For each κ (outer loop) ← [Simulated Annealing / Nelder-Mead]
-│
-├─► Estimate n_max (based on κ)
-│
-├─► Tune μ (inner loop)
-│     └─ Run short VMC with adaptive μ updates
-│     └─ Goal: find μ such that ⟨N⟩ ≈ N_target
-│     └─ If not achieved → return Inf (penalize κ)
-│
-├─► With (κ, μ*) fixed:
-│     └─ Run production VMC
-│     └─ Estimate energy ⟨H⟩
-│
-├─► Store (κ, μ*, ⟨N⟩, E) in trace
-│
-└─► Optimizer selects next κ based on energy
+This code currently estimates the ground state energy (zero temperature) for the one-dimensional Bose-Hubbard model in the grand canoncial ensemble given system parameters (L, N_target, U, t, mu). The ground state energy is estimated via Monte Carlo simulations for integration and Gradient Descent for parameter optimization. 
+
+Pleaes see the "run_benchmark.jl" file for more information on how to run the code.
