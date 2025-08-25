@@ -7,7 +7,7 @@ Last Updated: 07/08/25
     Summary: implemented normalization 
 =#
 function local_energy(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::System; μ::Real = 0)
-    f = ψ.f                     # shared Gutzwiller coefficient vector
+    log_f = ψ.f                     # shared Gutzwiller coefficient vector
     t, U = sys.t, sys.U
     lattice = sys.lattice
     L = length(n)
@@ -25,18 +25,23 @@ function local_energy(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::System; �
         for j in lattice.neighbors[i]
             if j > i
                 # hop j → i
-                if hop_possible(n, j, i, f)
-                    num = f[n[i]+2] * f[n[j]]
-                    den = f[n[i]+1] * f[n[j]+1]
-                    R1 = num / den
+                if hop_possible(n, j, i, log_f)
+                    num = log_f[n[i]+2] + log_f[n[j]]
+                    den = log_f[n[i]+1] + log_f[n[j]+1]
+                    log_R1 = num - den
+                    R1 = exp(log_R1)
+                    if !isfinite(R1) || R1 > 1e6
+                        @warn "Unphysical ratio R1: $R1 at n[i]=$(n[i]), n[j]=$(n[j])"
+                    end
                     E_kin += -t * sqrt((n[i]+1) * n[j]) * R1
                 end
 
                 # hop i → j
-                if hop_possible(n, i, j, f)
-                    num = f[n[j]+2] * f[n[i]]
-                    den = f[n[j]+1] * f[n[i]+1]
-                    R2 = num / den
+                if hop_possible(n, i, j, log_f)
+                    num = log_f[n[j]+2] + log_f[n[i]]
+                    den = log_f[n[j]+1] + log_f[n[i]+1]
+                    log_R2 = num - den
+                    R2 = exp(log_R2)
                     E_kin += -t * sqrt((n[j]+1) * n[i]) * R2
                 end
             end
@@ -46,12 +51,12 @@ function local_energy(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::System; �
     # Chemical potential correction
     N = sum(n)
 
-    return E_kin + E_pot #- μ*N    # only add for true grand canonical simulations
+    return E_kin + E_pot # - μ*N    # only add for true grand canonical simulations
 end
 
 
 function local_energy_parts(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::System)
-    f = ψ.f
+    log_f = ψ.f
     t, U = sys.t, sys.U
     lattice = sys.lattice
     L = length(n)
@@ -66,16 +71,18 @@ function local_energy_parts(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::Sys
     for i in 1:L
         for j in lattice.neighbors[i]
             if j > i
-                if hop_possible(n, j, i, f)
-                    num = f[n[i]+2] * f[n[j]]
-                    den = f[n[i]+1] * f[n[j]+1]
-                    R1 = num / den
+                if hop_possible(n, j, i, log_f)
+                    num = log_f[n[i]+2] + log_f[n[j]]
+                    den = log_f[n[i]+1] + log_f[n[j]+1]
+                    log_R1 = num - den
+                    R1 = exp(log_R1)
                     E_kin += -t * sqrt((n[i]+1) * n[j]) * R1
                 end
-                if hop_possible(n, i, j, f)
-                    num = f[n[j]+2] * f[n[i]]
-                    den = f[n[j]+1] * f[n[i]+1]
-                    R2 = num / den
+                if hop_possible(n, i, j, log_f)
+                    num = log_f[n[j]+2] + log_f[n[i]]
+                    den = log_f[n[j]+1] + log_f[n[i]+1]
+                    log_R2 = num - den
+                    R2 = exp(log_R2)
                     E_kin += -t * sqrt((n[j]+1) * n[i]) * R2
                 end
             end
@@ -83,4 +90,20 @@ function local_energy_parts(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::Sys
     end
 
     return E_kin, E_pot
+end
+
+
+function estimate_energy_gradient(result::VMCResults)
+    E_loc = result.energies
+    O_κ = result.derivative_log_psi
+
+    if isempty(E_loc) || isempty(O_κ)
+        return NaN
+    end
+
+    mean_E = mean(E_loc)
+    mean_O = mean(O_κ)
+    mean_EO = mean(E_loc .* O_κ)
+
+    return 2 * (mean_EO - mean_E * mean_O)
 end

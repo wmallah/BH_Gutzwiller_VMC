@@ -1,4 +1,5 @@
 using SpecialFunctions: loggamma
+using LogExpFunctions: logsumexp
 
 abstract type Wavefunction end
 
@@ -14,14 +15,14 @@ Last Updated: 07/16/25
 # Precompute factorial values to avoid redundant calculations
 const LOGFACTORIAL_TABLE = [loggamma(m + 1) for m in 0:100]  # supports up to n_max=100
 
-function generate_coefficients(n::Vector{Int}, κ::Real, n_max::Int; logfact=LOGFACTORIAL_TABLE)
+function generate_coefficients(κ::Real, n_max::Int; logfact=LOGFACTORIAL_TABLE)
     # Only compute 1 coefficient past the maximum number of particles allowed per site because kinetic energy computes f_n+1
-    n_cutoff = n_max + 1
-    f = [exp(-κ * m^2 / 2.0 - 0.5 * logfact[m + 1]) for m in 0:n_cutoff]
+    n_cutoff = n_max + 2
+    log_f = [-κ * m^2 / 2.0 - 0.5 * logfact[m + 1] for m in 0:n_cutoff]
     # Normalize the coefficients
-    Z = sum(abs2, f)
-    # println("Z = $Z")
-    return GutzwillerWavefunction(f)
+    log_Z = logsumexp(2 .* log_f)
+    f_normalized = log_f .- 0.5 * log_Z
+    return GutzwillerWavefunction(f_normalized)
 end
 
 

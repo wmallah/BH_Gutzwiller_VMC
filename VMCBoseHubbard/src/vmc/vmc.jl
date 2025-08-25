@@ -16,7 +16,9 @@ struct VMCResults
     sem_potential::Float64
     acceptance_ratio::Float64
     energies::Vector{Float64}
+    derivative_log_psi::Vector{Float64}
     num_failed_moves::Int
+    PN::Vector{Int}
 end
 
 
@@ -65,83 +67,66 @@ function VMC_fixed_particles(sys::System, κ::Real, n_max::Int, N_total::Int;
     num_accepted = 0
     num_failed_moves = 0
 
-    # 
-    ψ = generate_coefficients(fill(0, L), κ, n_max)  # Any dummy vector of length L works
+    # Generate the coefficients for the wavefunction
+    ψ = generate_coefficients(κ, n_max)  # Any dummy vector of length L works
 
     @showprogress enabled=true "Running Canonical VMC..." for step in 1:num_MC_steps
         for i in 1:num_walkers
             n_old = walkers[i]
             n_new = copy(n_old)
             moved = false
-            attempt_global = rand() < 0.02  # 2% chance of global hop [MAY REMOVE LATER IF NOT NEEDED]
 
             sites = shuffle(1:L)
 
-            if attempt_global
-                # Global move: allow hops between any two sites [MAY REMOVE LATER IF NOT NEEDED]
-                for from in sites
-                    if n_old[from] == 0
-                        continue
-                    end
-                    for to in shuffle(1:L)
-                        if to == from || n_old[to] >= n_max
-                            continue
-                        end
-
-                        n_new[from] -= 1
-                        n_new[to] += 1
-                        r = sampling_ratio(n_old, n_new, κ, n_max)
-
-                        if rand() < r
-                            walkers[i] = n_new
-                            num_accepted += 1
-                        end
-
-                        moved = true
-                        break
-                    end
-                    if moved
-                        break
-                    end
+            # Standard local hop: neighbors only
+            for from in sites
+                # If the source site has zero particles on it, choose a different source site
+                if n_old[from] == 0
+                    continue
                 end
-
-            else
-                # Standard local hop: neighbors only
-                for from in sites
-                    if n_old[from] == 0
+                for to in shuffle(sys.lattice.neighbors[from])
+                    # If the destination neighbor site has n_max or more particles on it, randomly choose a different neighbor destination site
+                    if n_old[to] >= n_max
                         continue
                     end
-                    for to in shuffle(sys.lattice.neighbors[from])
-                        if n_old[to] >= n_max
-                            continue
-                        end
 
-                        n_new[from] -= 1
-                        n_new[to] += 1
-                        r = sampling_ratio(n_old, n_new, κ, n_max)
+                    # If move is valid, update new configuration
+                    n_new[from] -= 1
+                    n_new[to] += 1
 
-                        if rand() < r
-                            walkers[i] = n_new
-                            num_accepted += 1
-                        end
+                    # Calculate the sampling ratio for the original and update configurations (probability of accepting move)
+                    r = sampling_ratio(n_old, n_new, κ, n_max)
 
-                        moved = true
-                        break
+                    # If the randomly generated value [0,1) is less than the sampling ration, accept the move
+                    if rand() < r
+                        # Add accepted configuration to set of walkers
+                        walkers[i] = n_new
+                        num_accepted += 1
                     end
-                    if moved
-                        break
-                    end
+
+                    # Regardless of acceptance status, break out of loop
+                    moved = true
+                    break
+                end
+                # Once again, regardless of acceptance status, break out of inner loop to re-enter outer loop, choosing a new source site
+                if moved
+                    break
                 end
             end
 
+            # If there were no possible moves to make, track failed move attempts
             if !moved
                 num_failed_moves += 1
-                continue
             end
 
+            # After equilibration, begin making measurements
             if step >= num_equil_steps
                 E = local_energy(walkers[i], ψ, sys)
+                if E > 1e4
+                    @warn "High energy"
+                end
                 T, V = local_energy_parts(walkers[i], ψ, sys)
+                # Only keep measurements with finite values
                 if isfinite(E)
                     push!(energies, E)
                     push!(kinetic, T)
@@ -151,12 +136,14 @@ function VMC_fixed_particles(sys::System, κ::Real, n_max::Int, N_total::Int;
         end
     end
 
+    # If no measurements (no possible moves) were made, return Inf for all measurements values, effectively detering optimizer from this region of parameter space
     if isempty(energies)
         @warn "No valid energy samples collected! Returning Inf energy."
         println("Bad")
         return VMCResults(Inf, Inf, Inf, Inf, Inf, Inf, 0.0, Float64[], num_failed_moves)
     end
 
+    # If the energies vector is not empty, calculate the mean and standard deviations of all energy types as well as the move acceptance ratio
     mean_energy = mean(energies)
     sem_energy = std(energies) / sqrt(length(energies))
     mean_kinetic = mean(kinetic)
@@ -176,6 +163,19 @@ struct GrandCanonicalStats
     steps::Vector{Int}
 end
 
+function check_and_warn_walker(n::Vector{Int}, n_max::Int)
+    if any(isnan, n)
+        @warn "Walker contains NaN: $n"
+        return false
+    elseif any(isinf, n)
+        @warn "Walker contains Inf: $n"
+        return false
+    elseif any(x -> x < 0 || x > n_max, n)
+        @warn "Walker has out-of-bounds occupation: $n"
+        return false
+    end
+    return true
+end
 
 #=
 Purpose: perform variational Monte Carlo to integrate the local energy for the grand canoical
@@ -185,166 +185,124 @@ Output: struct of variational Monte Carlo results (see struct defined above)
 Author: Will Mallah
 Last Updated: 07/16/25
 =#
-function VMC_grand_canonical_adaptive_mu(sys::System, κ::Real, n_max::Int, 
-                                          N_target::Real, μ::Real;
-                                          η::Real = 0.1,
-                                          μ_bounds::Tuple{Float64, Float64} = (-10.0, 10.0),
-                                          update_interval::Int = 500,
-                                          num_walkers::Int = 200,
-                                          num_MC_steps::Int = 30000,
-                                          num_equil_steps::Int = 5000)
+function VMC_grand_canonical(sys::System, κ::Real, n_max::Int;
+                              μ_init::Real = 1.6,
+                              N_target::Int = 12,
+                              num_walkers::Int = 200,
+                              num_MC_steps::Int = 30000,
+                              num_equil_steps::Int = 5000,
+                              track_derivative::Bool = false)
 
+    # Extract the system size from the number of rows in the adjacency matrix
     L = length(sys.lattice.neighbors)
-    walkers = [zeros(Int, L) for _ in 1:num_walkers]
 
-    # Hot start
-    for _ in 1:1000
-        for w in walkers
-            site = rand(1:L)
-            if w[site] < n_max
-                w[site] += 1
-            end
+    # Set the mu value to the initial geuss [NO MU-TUNING DONE YET]
+    μ = μ_init
+
+    # Function that takes in the system size and target number of particles and returns a random array for the system configuration
+    function random_walker(L::Int, N::Int)
+        idx = randperm(L)[1:N]
+        w = zeros(Int, L)
+        for i in idx
+            w[i] = 1
         end
+        return w
     end
 
-    ψ = generate_coefficients(fill(0, L), κ, n_max)
-    energies = Float64[]
-    kinetic = Float64[]
-    potential = Float64[]
-    total_N = Float64[]
-    num_accepted = 0
-    num_failed_moves = 0
-    acceptance_trace = Float64[]  # Optional: track over time
+    # Generate an array of random walkers (system configurations)
+    walkers = [random_walker(L, N_target) for _ in 1:num_walkers]    
 
-    mu_trace = Float64[]
-    N_trace = Float64[]
-    steps = Int[]
+    # Generate the coefficients for the Gutzwiller wavefunction
+    ψ = generate_coefficients(κ, n_max)
 
-    @showprogress enabled=true "Running Grand Canonical VMC with adaptive μ..." for step in 1:num_MC_steps
+    # Histogram and statistics
+    PN = zeros(Int, 2000)
+    num_accepted_moves, num_failed_moves = 0, 0
+
+    energies, derivative_log_psi, kinetic, potential, total_N = Float64[], Float64[], Float64[], Float64[], Float64[]
+
+    @showprogress enabled=true "Running Grand Canonical VMC..." for step in 1:num_MC_steps
         for i in 1:num_walkers
             n_old = walkers[i]
             n_new = copy(n_old)
 
-            insert_sites = [i for i in 1:L if n_old[i] < n_max]
-            remove_sites = [i for i in 1:L if n_old[i] > 0]
+            insert_sites = [j for j in 1:L if n_old[j] < n_max]
+            remove_sites = [j for j in 1:L if n_old[j] > 0]
+            moves_old = vcat([(j, +1) for j in insert_sites]..., [(j, -1) for j in remove_sites]...)
 
-            ΔN = 0
-
-            move_type = rand(Bool)  # true = insert, false = remove
-
-            if move_type && !isempty(insert_sites)
-                site = rand(insert_sites)
-                n_new[site] += 1
-                ΔN = +1
-
-            elseif !move_type && !isempty(remove_sites)
-                site = rand(remove_sites)
-                n_new[site] -= 1
-                ΔN = -1
-
-            else
-                # No valid move possible for the chosen type; mark as rejected
-                ΔN = 0
-            end
-
-            if ΔN == 0
+            if isempty(moves_old)
                 num_failed_moves += 1
                 continue
+            end
+
+            site, ΔN = rand(moves_old)
+            n_new[site] += ΔN
+
+            insert_sites_new = [j for j in 1:L if n_new[j] < n_max]
+            remove_sites_new = [j for j in 1:L if n_new[j] > 0]
+            moves_new = vcat([(j, +1) for j in insert_sites_new]..., [(j, -1) for j in remove_sites_new]...)
+
+            if isempty(moves_new)
+                num_failed_moves += 1
+                continue
+            end
+
+            r = sampling_ratio(n_old, n_new, κ, n_max) *
+                exp(μ * ΔN) *
+                (length(moves_old) / length(moves_new))
+
+            if rand() < r
+                walkers[i] = n_new
+                num_accepted_moves += 1
             else
-                r = sampling_ratio(n_old, n_new, κ, n_max) * exp(μ * ΔN)
-
-                if rand() < r
-                    walkers[i] = n_new
-                    num_accepted += 1
-                else
-                    num_failed_moves += 1
-                    continue
-                end
+                num_failed_moves += 1
+                continue
             end
 
-            if step > num_equil_steps
-                E = local_energy(walkers[i], ψ, sys; μ=μ)
-                T, V = local_energy_parts(walkers[i], ψ, sys)
-                if isfinite(E)
-                    push!(energies, E)
-                    push!(kinetic, T)
-                    push!(potential, V)
-                    push!(total_N, sum(walkers[i]))
+            N_now = sum(walkers[i])
+            if N_now + 1 <= length(PN)
+                PN[N_now + 1] += 1
+            end
+
+            if check_and_warn_walker(walkers[i], n_max)
+                if step >= num_equil_steps && N_now == N_target
+                    E = local_energy(walkers[i], ψ, sys; μ=μ)
+                    T, V = local_energy_parts(walkers[i], ψ, sys)
+                    if isfinite(E)
+                        push!(energies, E)
+                        push!(kinetic, T)
+                        push!(potential, V)
+                        push!(total_N, N_now)
+                        if track_derivative
+                            val = -0.5 * sum(walkers[i] .^ 2) / L
+                            if !isfinite(val)
+                                @warn "Non-finite derivative_log_psi value: $val"
+                            else
+                                push!(derivative_log_psi, val)
+                            end
+                        end
+                    else
+                        @warn "Non-finite local energy detected: E = $E"
+                        continue
+                    end
                 end
+            else
+                @warn "Invalid walker skipped"
             end
         end
-
-        if step % update_interval == 0 && step > num_equil_steps
-            avg_N = mean(total_N)
-            Δμ = η * (N_target - avg_N)
-            μ += tanh(Δμ) * η  # smooth response
-
-            # Optional clamping
-            μ = clamp(μ, μ_bounds[1], μ_bounds[2])
-
-            # Tracking
-            push!(mu_trace, μ)
-            push!(N_trace, avg_N)
-            push!(steps, step)
-
-            empty!(total_N)
-        end
-        acceptance = num_accepted / (num_accepted + num_failed_moves)
-        @debug "Step $step: acceptance ratio = $acceptance"
-        push!(acceptance_trace, acceptance)  # optional: store for later plotting
     end
+
+    acceptance_ratio = num_accepted_moves / (num_accepted_moves + num_failed_moves)
 
     if isempty(energies)
         @warn "No valid energy samples collected!"
-        return VMCResults(Inf, Inf, Inf, Inf, Inf, Inf, 0.0, Float64[], num_failed_moves),
-               GrandCanonicalStats(mu_trace, N_trace, steps)
+        return VMCResults(Inf, Inf, Inf, Inf, Inf, Inf, 0.0, Float64[], Float64[], num_failed_moves, Int[])
     end
 
-    mean_energy = mean(energies)
-    sem_energy = std(energies) / sqrt(length(energies))
-    mean_kinetic = mean(kinetic)
-    sem_kinetic = std(kinetic) / sqrt(length(kinetic))
-    mean_potential = mean(potential)
-    sem_potential = std(potential) / sqrt(length(potential))
-    acceptance_ratio = num_accepted / (num_MC_steps * num_walkers)
-
-    return VMCResults(mean_energy, sem_energy, mean_kinetic, sem_kinetic, mean_potential, sem_potential, acceptance_ratio, energies, num_failed_moves),
-           GrandCanonicalStats(mu_trace, N_trace, steps)
-end
-
-
-"""
-    tune_mu_and_log(sys, κ, n_max, N_target; η=0.01, μ_init=1.0, tune_steps=5000, walkers=200, update_interval=200)
-
-Tunes the chemical potential μ to match N_target for a given κ and logs the μ and ⟨N⟩ evolution.
-
-Returns:
-  μ_final::Float64      — final tuned chemical potential
-  N_final::Float64      — corresponding particle number
-  stats::GrandCanonicalStats  — full tracking info
-"""
-function tune_mu_and_log(sys::System, κ::Real, n_max::Int, N_target::Real;
-                         η::Float64 = 0.01,
-                         μ_init::Float64 = 1.0,
-                         tune_steps::Int = 5000,
-                         walkers::Int = 200,
-                         update_interval::Int = 200)
-
-    println("🔧 Autotuning μ for κ = $κ to target N = $N_target")
-
-    _, stats = VMC_grand_canonical_adaptive_mu(sys, κ, n_max, N_target, μ_init;
-                                                η = η,
-                                                num_walkers = walkers,
-                                                num_MC_steps = tune_steps,
-                                                num_equil_steps = 0,
-                                                update_interval = update_interval)
-
-    # for (s, mu, N) in zip(stats.steps, stats.mu_trace, stats.N_trace)
-    #     println("  step = $s, μ = $mu, ⟨N⟩ = $N")
-    # end
-
-    μ_final = stats.mu_trace[end]
-    N_final = stats.N_trace[end]
-
-    return μ_final, N_final, stats
+    return VMCResults(
+        mean(energies), std(energies) / sqrt(length(energies)),
+        mean(kinetic), std(kinetic) / sqrt(length(kinetic)),
+        mean(potential), std(potential) / sqrt(length(potential)),
+        acceptance_ratio, energies, derivative_log_psi, num_failed_moves, PN
+    )
 end
