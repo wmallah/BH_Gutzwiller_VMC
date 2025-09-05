@@ -157,12 +157,7 @@ function VMC_fixed_particles(sys::System, κ::Real, n_max::Int, N_total::Int;
 end
 
 
-struct GrandCanonicalStats
-    mu_trace::Vector{Float64}
-    N_trace::Vector{Float64}
-    steps::Vector{Int}
-end
-
+# Function to ensure our walkers (system configurations) have physical entries
 function check_and_warn_walker(n::Vector{Int}, n_max::Int)
     if any(isnan, n)
         @warn "Walker contains NaN: $n"
@@ -180,13 +175,13 @@ end
 #=
 Purpose: perform variational Monte Carlo to integrate the local energy for the grand canoical
 Input: sys (system struct), κ (variational parameter), n_max (maximum number of particles on a given site), N_target (target value for total number of particles), μ (initial guess for the chemical potential)
-Optional Input: η (chemical potential tuning rate), update_interval (how many steps between updating chemical potential), num_walkers, num_MC_steps, num_equil_steps
+Optional Input: num_walkers, num_MC_steps, num_equil_steps
 Output: struct of variational Monte Carlo results (see struct defined above)
 Author: Will Mallah
 Last Updated: 07/16/25
 =#
 function VMC_grand_canonical(sys::System, κ::Real, n_max::Int;
-                              μ_init::Real = 1.6,
+                              μ::Real = 1.0,
                               N_target::Int = 12,
                               num_walkers::Int = 200,
                               num_MC_steps::Int = 30000,
@@ -195,9 +190,6 @@ function VMC_grand_canonical(sys::System, κ::Real, n_max::Int;
 
     # Extract the system size from the number of rows in the adjacency matrix
     L = length(sys.lattice.neighbors)
-
-    # Set the mu value to the initial geuss [NO MU-TUNING DONE YET]
-    μ = μ_init
 
     # Function that takes in the system size and target number of particles and returns a random array for the system configuration
     function random_walker(L::Int, N::Int)
@@ -219,60 +211,108 @@ function VMC_grand_canonical(sys::System, κ::Real, n_max::Int;
     PN = zeros(Int, 2000)
     num_accepted_moves, num_failed_moves = 0, 0
 
+    # Create empty arrays for all the measurements we want to track
     energies, derivative_log_psi, kinetic, potential, total_N = Float64[], Float64[], Float64[], Float64[], Float64[]
 
+    # Begin Monte Carlo Loop outer loop (number of steps in our simulation)
     @showprogress enabled=true "Running Grand Canonical VMC..." for step in 1:num_MC_steps
+        # Begin Monte Carlo inner loop (number of walkers/configurations)
         for i in 1:num_walkers
-            n_old = walkers[i]
-            n_new = copy(n_old)
 
-            insert_sites = [j for j in 1:L if n_old[j] < n_max]
-            remove_sites = [j for j in 1:L if n_old[j] > 0]
-            moves_old = vcat([(j, +1) for j in insert_sites]..., [(j, -1) for j in remove_sites]...)
-
-            if isempty(moves_old)
-                num_failed_moves += 1
-                continue
-            end
-
-            site, ΔN = rand(moves_old)
-            n_new[site] += ΔN
-
-            insert_sites_new = [j for j in 1:L if n_new[j] < n_max]
-            remove_sites_new = [j for j in 1:L if n_new[j] > 0]
-            moves_new = vcat([(j, +1) for j in insert_sites_new]..., [(j, -1) for j in remove_sites_new]...)
-
-            if isempty(moves_new)
-                num_failed_moves += 1
-                continue
-            end
-
-            r = sampling_ratio(n_old, n_new, κ, n_max) *
-                exp(μ * ΔN) *
-                (length(moves_old) / length(moves_new))
-
-            if rand() < r
-                walkers[i] = n_new
-                num_accepted_moves += 1
-            else
-                num_failed_moves += 1
-                continue
-            end
-
+            # Histogram the total number of particles from the configurations
             N_now = sum(walkers[i])
             if N_now + 1 <= length(PN)
                 PN[N_now + 1] += 1
             end
 
+            # Initialize the old and new sets of configurations
+            n_old = walkers[i]
+            n_new = copy(n_old)
+
+            if rand() < 0.0
+                moved = false
+                sites = shuffle(1:L)
+
+                # Standard local hop: neighbors only
+                for from in sites
+                    # If the source site has zero particles on it, choose a different source site
+                    if n_old[from] == 0
+                        continue
+                    end
+                    for to in shuffle(sys.lattice.neighbors[from])
+                        # If the destination neighbor site has n_max or more particles on it, randomly choose a different neighbor destination site
+                        if n_old[to] >= n_max
+                            continue
+                        end
+
+                        # If move is valid, update new configuration
+                        n_new[from] -= 1
+                        n_new[to] += 1
+
+                        # Calculate the sampling ratio for the original and update configurations (probability of accepting move)
+                        r = sampling_ratio(n_old, n_new, κ)
+
+                        # If the randomly generated value [0,1) is less than the sampling ration, accept the move
+                        if rand() < r
+                            # Add accepted configuration to set of walkers
+                            walkers[i] = n_new
+                            num_accepted_moves += 1
+                        else
+                            num_failed_moves += 1
+                        end
+
+                        # Regardless of acceptance status, break out of loop
+                        moved = true
+                        break
+                    end
+                    # Once again, regardless of acceptance status, break out of inner loop to re-enter outer loop, choosing a new source site
+                    if moved
+                        break
+                    end
+                end
+            else
+                # Randomly select a site of the current configuration
+                site = rand(n_old)
+
+                # Add or remove a particle on this site with 50/50 probability
+                if rand() < 0.5
+                    n_new[site] += 1
+                else
+                    n_new[site] -= 1
+                end
+
+                # Calculate the terms for the log of our accetance probability to avoid overflow
+                log_sampling_ratio = log(sampling_ratio(n_old, n_new, κ))
+
+                # Reject proposed move if unphysical
+                if n_old[site] >= n_max || n_old < 0
+                    num_failed_moves += 1
+                    continue
+                else
+                    # Accept move based on Metroplois-Hastings
+                    if log(rand()) < log_sampling_ratio
+                        walkers[i] = n_new
+                        num_accepted_moves += 1
+                    else
+                        num_failed_moves += 1
+                        continue
+                    end
+                end
+            end
+
+            # Check to make sure the walkers have physically correct entries
             if check_and_warn_walker(walkers[i], n_max)
-                if step >= num_equil_steps && N_now == N_target
-                    E = local_energy(walkers[i], ψ, sys; μ=μ)
-                    T, V = local_energy_parts(walkers[i], ψ, sys)
+                # Only make measurements after equilibration and with the target number of particles in the system
+                if step >= num_equil_steps
+                    # Measure the total local energy as well as the kinetic and potential energies separately
+                    E, T, V = local_energy(walkers[i], ψ, sys; μ=μ)
+                    # If the energy energy is finite, push to the respective vectors
                     if isfinite(E)
                         push!(energies, E)
                         push!(kinetic, T)
                         push!(potential, V)
                         push!(total_N, N_now)
+                        # Calculate and track this value (derivative of log psi) for the gradient in our Gradient Descent optimization method
                         if track_derivative
                             val = -0.5 * sum(walkers[i] .^ 2) / L
                             if !isfinite(val)
@@ -292,6 +332,7 @@ function VMC_grand_canonical(sys::System, κ::Real, n_max::Int;
         end
     end
 
+    # Calculate the acceptance ratio to check if the simulation is accepting or rejecting most proposed moves
     acceptance_ratio = num_accepted_moves / (num_accepted_moves + num_failed_moves)
 
     if isempty(energies)

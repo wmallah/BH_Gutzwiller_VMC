@@ -26,7 +26,7 @@ Output: sampling ratio between two system states
 Author: Will Mallah
 Last Updated: 07/04/25
 =#
-function sampling_ratio(n_old::Vector{Int}, n_new::Vector{Int}, κ::Real, n_max::Int)
+function sampling_ratio(n_old::Vector{Int}, n_new::Vector{Int}, κ::Real)
     ratio = 1.0
     for i in eachindex(n_old)
         if n_old[i] != n_new[i]

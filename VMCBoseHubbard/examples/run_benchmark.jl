@@ -10,12 +10,8 @@ import ..VMCBoseHubbard: VMC_grand_canonical
 L = 12
 N_target = 12
 t = 1.0
-# U_vals = 1.0:1.0:10.0
-# U_vals = [1.0, 2.0, 3.0, 4.0, 5.0]
-# mu_vals = [1.367650127034, 0.661328990301, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0]
-# mu_vals = 1.0:0.1:2.0
-U_vals = [9.0]
-mu_vals = [1.4]
+U_vals = 1.0:1.0:10.0
+mu_vals = [-1.194156348118, -0.621279070037, -0.065591927910, 0.558099395624, 1.127210517443, 1.218138380352, 1.429231731476, 1.529283350963, 1.667613213242, 1.732659757193]
 dim = "1D"
 canonical = false  # Set to false for gradient descent VMC
 
@@ -35,19 +31,19 @@ for (U, μ) in zip(U_vals, mu_vals)
 
     κ_opt, history = optimize_kappa(sys, n_max, μ;
                                     κ_init = 1.0,
-                                    η = 0.05,
+                                    η = 0.01,
                                     N_target = N_target,
-                                    num_iters = 40,
+                                    num_iters = 20,
                                     num_walkers = 200,
                                     num_MC_steps = 2000)
 
     # Final evaluation with optimized κ
     final_result = VMC_grand_canonical(sys, κ_opt, n_max;
-                                    μ_init = μ,
+                                    μ = μ,
                                     N_target = N_target,
-                                    num_walkers = 400,
-                                    num_MC_steps = 10000,
-                                    num_equil_steps = 2000)
+                                    num_walkers = 200,
+                                    num_MC_steps = 5000,
+                                    num_equil_steps = 1000)
 
     push!(results, (U=U, κ=κ_opt, result=final_result))
 

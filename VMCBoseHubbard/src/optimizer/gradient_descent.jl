@@ -16,25 +16,11 @@ function optimize_kappa(sys::System, n_max::Int, μ::Float64;
     κ = κ_init
     history = []
 
-    # result = VMC_grand_canonical(sys, κ, n_max;
-    #                                 μ_init = μ,
-    #                                 N_target=N_target,
-    #                                 num_walkers=num_walkers,
-    #                                 num_MC_steps=num_MC_steps,
-    #                                 num_equil_steps=num_equil_steps,
-    #                                 track_derivative=true)  # <-- important!
-
-    # grad = estimate_energy_gradient(result)
-
-    # iter = 1
-
-    # Maybe switch to while loop to run until gradient is very small rather than giving a set number of iterations for each run 
     for iter in 1:num_iters
-    # while grad > 0.05 || grad < -0.05
         println("[Iteration $iter] κ = $(round(κ, digits=6))")
 
         result = VMC_grand_canonical(sys, κ, n_max;
-                                    μ_init = μ,
+                                    μ = μ,
                                     N_target=N_target,
                                     num_walkers=num_walkers,
                                     num_MC_steps=num_MC_steps,
@@ -57,7 +43,6 @@ function optimize_kappa(sys::System, n_max::Int, μ::Float64;
         end
 
         push!(history, (κ=κ, energy=E, gradient=grad))
-        # iter += 1
     end
 
     # Return best κ found
