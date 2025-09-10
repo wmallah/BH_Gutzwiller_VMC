@@ -186,7 +186,8 @@ function VMC_grand_canonical(sys::System, κ::Real, n_max::Int;
                               num_walkers::Int = 200,
                               num_MC_steps::Int = 30000,
                               num_equil_steps::Int = 5000,
-                              track_derivative::Bool = false)
+                              track_derivative::Bool = false,
+                              projective::Bool = false)
 
     # Extract the system size from the number of rows in the adjacency matrix
     L = length(sys.lattice.neighbors)
@@ -272,7 +273,7 @@ function VMC_grand_canonical(sys::System, κ::Real, n_max::Int;
                 end
             else
                 # Randomly select a site of the current configuration
-                site = rand(n_old)
+                site = rand(1:L)
 
                 # Add or remove a particle on this site with 50/50 probability
                 if rand() < 0.5
@@ -281,21 +282,19 @@ function VMC_grand_canonical(sys::System, κ::Real, n_max::Int;
                     n_new[site] -= 1
                 end
 
-                # Calculate the terms for the log of our accetance probability to avoid overflow
-                log_sampling_ratio = log(sampling_ratio(n_old, n_new, κ))
-
                 # Reject proposed move if unphysical
-                if n_old[site] >= n_max || n_old < 0
+                if n_new[site] > n_max || n_new[site] < 0
                     num_failed_moves += 1
-                    continue
                 else
+                    # Calculate the terms for the log of our accetance probability to avoid overflow
+                    log_sampling_ratio = log(sampling_ratio(n_old, n_new, κ))
+
                     # Accept move based on Metroplois-Hastings
                     if log(rand()) < log_sampling_ratio
                         walkers[i] = n_new
                         num_accepted_moves += 1
                     else
                         num_failed_moves += 1
-                        continue
                     end
                 end
             end
@@ -305,7 +304,11 @@ function VMC_grand_canonical(sys::System, κ::Real, n_max::Int;
                 # Only make measurements after equilibration and with the target number of particles in the system
                 if step >= num_equil_steps
                     # Measure the total local energy as well as the kinetic and potential energies separately
-                    E, T, V = local_energy(walkers[i], ψ, sys; μ=μ)
+                    if (projective && N_now == N_target) || !projective
+                        E, T, V = local_energy(walkers[i], ψ, sys; μ=μ)
+                    else
+                        continue
+                    end
                     # If the energy energy is finite, push to the respective vectors
                     if isfinite(E)
                         push!(energies, E)

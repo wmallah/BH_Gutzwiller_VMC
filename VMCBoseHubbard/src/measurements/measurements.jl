@@ -51,7 +51,7 @@ function local_energy(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::System; �
     # Chemical potential correction
     N = sum(n)
 
-    return E_kin + E_pot, E_kin, E_pot
+    return E_kin + E_pot - μ*N, E_kin, E_pot
 end
 
 

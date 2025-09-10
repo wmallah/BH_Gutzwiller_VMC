@@ -31,19 +31,21 @@ for (U, μ) in zip(U_vals, mu_vals)
 
     κ_opt, history = optimize_kappa(sys, n_max, μ;
                                     κ_init = 1.0,
-                                    η = 0.01,
+                                    η = 0.05,
                                     N_target = N_target,
-                                    num_iters = 20,
+                                    num_iters = 50,
                                     num_walkers = 200,
-                                    num_MC_steps = 2000)
+                                    num_MC_steps = 4000,
+                                    num_equil_steps = 1000)
 
     # Final evaluation with optimized κ
     final_result = VMC_grand_canonical(sys, κ_opt, n_max;
                                     μ = μ,
                                     N_target = N_target,
                                     num_walkers = 200,
-                                    num_MC_steps = 5000,
-                                    num_equil_steps = 1000)
+                                    num_MC_steps = 50000,
+                                    num_equil_steps = 10000,
+                                    projective=false)
 
     push!(results, (U=U, κ=κ_opt, result=final_result))
 
