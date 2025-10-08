@@ -17,7 +17,7 @@ function optimize_kappa(sys::System, n_max::Int, μ::Float64;
     history = []
 
     for iter in 1:num_iters
-        println("[Iteration $iter] κ = $(round(κ, digits=6))")
+        println("[Iteration $iter] κ = $(round(κ, digits=12))")
 
         result = VMC_grand_canonical(sys, κ, n_max;
                                     μ = μ,
@@ -35,7 +35,7 @@ function optimize_kappa(sys::System, n_max::Int, μ::Float64;
 
         # Update
         κ -= η * grad
-        κ = clamp(κ, 1e-6, 5.0)
+        κ = clamp(κ, 1e-12, 10.0)
 
         if !isfinite(κ) || !isfinite(grad)
             @warn "Stopping: Non-finite κ or gradient"
