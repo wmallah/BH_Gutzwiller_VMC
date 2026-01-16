@@ -180,14 +180,13 @@ Output: struct of variational Monte Carlo results (see struct defined above)
 Author: Will Mallah
 Last Updated: 07/16/25
 =#
-function VMC_grand_canonical(sys::System, κ::Real, n_max::Int;
-                              μ::Real = 1.0,
-                              N_target::Int = 12,
+function VMC_grand_canonical(sys::System, κ::Real, n_max::Int,
+                              μ::Real,
+                              N_target::Int;
                               num_walkers::Int = 200,
                               num_MC_steps::Int = 30000,
                               num_equil_steps::Int = 5000,
-                              track_derivative::Bool = false,
-                              projective::Bool = false)
+                              track_derivative::Bool = false)
 
     # Extract the system size from the number of rows in the adjacency matrix
     L = length(sys.lattice.neighbors)
@@ -206,7 +205,7 @@ function VMC_grand_canonical(sys::System, κ::Real, n_max::Int;
     walkers = [random_walker(L, N_target) for _ in 1:num_walkers]    
 
     # Generate the coefficients for the Gutzwiller wavefunction
-    ψ = generate_coefficients(κ, n_max)
+    wf = generate_coefficients(κ, n_max)
 
     # Histogram and statistics
     PN = zeros(Int, 2000)
@@ -219,116 +218,74 @@ function VMC_grand_canonical(sys::System, κ::Real, n_max::Int;
     @showprogress enabled=true "Running Grand Canonical VMC..." for step in 1:num_MC_steps
         # Begin Monte Carlo inner loop (number of walkers/configurations)
         for i in 1:num_walkers
+            # Initialize the old and new sets of configurations
+            n_old = walkers[i]
+            n_new = copy(n_old)
 
+            # Randomly select a site of the current configuration
+            site = rand(1:L)
+
+            # Add or remove a particle on this site with 50/50 probability
+            if rand() < 0.5
+                n_new[site] += 1
+            else
+                n_new[site] -= 1
+            end
+
+            # Reject proposed move if unphysical
+            if n_new[site] > n_max || n_new[site] < 0
+                num_failed_moves += 1
+            else
+                # Single-site Gutzwiller log acceptance ratio:
+                # log( |Ψ(new)|^2 / |Ψ(old)|^2 ) = 2*(log|f(n_new)| - log|f(n_old)|)
+                n0 = n_old[site]
+                n1 = n_new[site]
+                log_ratio = 2.0 * (wf.f[n1 + 1] - wf.f[n0 + 1])
+
+                # Accept move based on Metropolis-Hastings
+                if isfinite(log_ratio) && log(rand()) < log_ratio
+                    walkers[i] = n_new
+                    num_accepted_moves += 1
+                else
+                    num_failed_moves += 1
+                end
+            end
+            
             # Histogram the total number of particles from the configurations
             N_now = sum(walkers[i])
             if N_now + 1 <= length(PN)
                 PN[N_now + 1] += 1
             end
 
-            # Initialize the old and new sets of configurations
-            n_old = walkers[i]
-            n_new = copy(n_old)
-
-            if rand() < 0.0
-                moved = false
-                sites = shuffle(1:L)
-
-                # Standard local hop: neighbors only
-                for from in sites
-                    # If the source site has zero particles on it, choose a different source site
-                    if n_old[from] == 0
-                        continue
-                    end
-                    for to in shuffle(sys.lattice.neighbors[from])
-                        # If the destination neighbor site has n_max or more particles on it, randomly choose a different neighbor destination site
-                        if n_old[to] >= n_max
-                            continue
-                        end
-
-                        # If move is valid, update new configuration
-                        n_new[from] -= 1
-                        n_new[to] += 1
-
-                        # Calculate the sampling ratio for the original and update configurations (probability of accepting move)
-                        r = sampling_ratio(n_old, n_new, κ)
-
-                        # If the randomly generated value [0,1) is less than the sampling ration, accept the move
-                        if rand() < r
-                            # Add accepted configuration to set of walkers
-                            walkers[i] = n_new
-                            num_accepted_moves += 1
-                        else
-                            num_failed_moves += 1
-                        end
-
-                        # Regardless of acceptance status, break out of loop
-                        moved = true
-                        break
-                    end
-                    # Once again, regardless of acceptance status, break out of inner loop to re-enter outer loop, choosing a new source site
-                    if moved
-                        break
-                    end
-                end
-            else
-                # Randomly select a site of the current configuration
-                site = rand(1:L)
-
-                # Add or remove a particle on this site with 50/50 probability
-                if rand() < 0.5
-                    n_new[site] += 1
-                else
-                    n_new[site] -= 1
-                end
-
-                # Reject proposed move if unphysical
-                if n_new[site] > n_max || n_new[site] < 0
-                    num_failed_moves += 1
-                else
-                    # Calculate the terms for the log of our accetance probability to avoid overflow
-                    log_sampling_ratio = log(sampling_ratio(n_old, n_new, κ))
-
-                    # Accept move based on Metroplois-Hastings
-                    if log(rand()) < log_sampling_ratio
-                        walkers[i] = n_new
-                        num_accepted_moves += 1
-                    else
-                        num_failed_moves += 1
-                    end
-                end
-            end
-
             # Check to make sure the walkers have physically correct entries
             if check_and_warn_walker(walkers[i], n_max)
                 # Only make measurements after equilibration and with the target number of particles in the system
                 if step >= num_equil_steps
-                    # Measure the total local energy as well as the kinetic and potential energies separately
-                    if (projective && N_now == N_target) || !projective
-                        E, T, V = local_energy(walkers[i], ψ, sys; μ=μ)
-                    else
-                        continue
-                    end
-                    # If the energy energy is finite, push to the respective vectors
-                    if isfinite(E)
-                        push!(energies, E)
-                        push!(kinetic, T)
-                        push!(potential, V)
-                        push!(total_N, N_now)
-                        # Calculate and track this value (derivative of log psi) for the gradient in our Gradient Descent optimization method
-                        if track_derivative
-                            val = -0.5 * sum(walkers[i] .^ 2) / L
-                            if !isfinite(val)
-                                @warn "Non-finite derivative_log_psi value: $val"
-                            else
-                                push!(derivative_log_psi, val)
+                    # if N_now == N_target
+                        # Measure the total local energy as well as the kinetic and potential energies separately
+                        E, T, V = local_energy(walkers[i], wf, sys; μ=μ, n_max=n_max)
+
+                        # If the energy energy is finite, push to the respective vectors
+                        if isfinite(E)
+                            push!(energies, E)
+                            push!(kinetic, T)
+                            push!(potential, V)
+                            push!(total_N, N_now)
+                            # Calculate and track this value (derivative of log psi) for the gradient in our Gradient Descent optimization method
+                            if track_derivative
+                                val = -0.5 * sum(walkers[i] .^ 2)
+                                if !isfinite(val)
+                                    @warn "Non-finite derivative_log_psi value: $val"
+                                else
+                                    push!(derivative_log_psi, val)
+                                end
                             end
+                        else
+                            @warn "Non-finite local energy detected: E = $E"
+                            continue
                         end
-                    else
-                        @warn "Non-finite local energy detected: E = $E"
-                        continue
                     end
-                end
+                # end
             else
                 @warn "Invalid walker skipped"
             end

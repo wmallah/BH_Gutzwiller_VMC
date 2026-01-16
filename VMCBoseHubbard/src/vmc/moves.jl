@@ -1,22 +1,19 @@
 #=
 Purpose: determine if a hop between sites is possible
-Input: n (vector of integers describing the system state), from (site index of hop source), to (site index of hop destination), f (matrix of coefficients from Gutzwiller Wavefunction)
+Input: n (vector of integers describing the system state), from (site index of hop source), to (site index of hop destination), n_max (maximum number of particles on a given site)
 Output: true if hop is possible, false if hop is not possible
 Author: Will Mallah
-Last Updated: 07/04/25
+Last Updated: 01/13/26
 To-Do: 
 =#
-function hop_possible(n::Vector{Int}, from::Int, to::Int, f::Vector{<:Real})
+function hop_possible(n::Vector{Int}, from::Int, to::Int, n_max::Int)
     L = length(n)
-    n_max = length(f) - 1
-    n_from = n[from]
-    n_to = n[to]
-
     return 1 ≤ from ≤ L &&
            1 ≤ to ≤ L &&
-           n_from > 0 &&
-           n_to < n_max
+           n[from] > 0 &&
+           n[to] < n_max
 end
+
 
 
 #=

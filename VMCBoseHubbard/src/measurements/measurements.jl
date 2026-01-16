@@ -6,7 +6,7 @@ Author: Will Mallah
 Last Updated: 07/08/25
     Summary: implemented normalization 
 =#
-function local_energy(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::System; μ::Real = 0)
+function local_energy(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::System; μ::Real = 0, n_max = 2)
     log_f = ψ.f                     # shared Gutzwiller coefficient vector
     t, U = sys.t, sys.U
     lattice = sys.lattice
@@ -25,24 +25,19 @@ function local_energy(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::System; �
         for j in lattice.neighbors[i]
             if j > i
                 # hop j → i
-                if hop_possible(n, j, i, log_f)
-                    num = log_f[n[i]+2] + log_f[n[j]]
-                    den = log_f[n[i]+1] + log_f[n[j]+1]
-                    log_R1 = num - den
+                if hop_possible(n, j, i, n_max)
+                    # log R = log[ f(ni+1) f(nj-1) / ( f(ni) f(nj) ) ]
+                    log_R1 = (log_f[n[i] + 2] + log_f[n[j]]) - (log_f[n[i] + 1] + log_f[n[j] + 1])
                     R1 = exp(log_R1)
-                    if !isfinite(R1) || R1 > 1e6
-                        @warn "Unphysical ratio R1: $R1 at n[i]=$(n[i]), n[j]=$(n[j])"
-                    end
-                    E_kin += -t * sqrt((n[i]+1) * n[j]) * R1
+                    E_kin += -t * sqrt((n[i] + 1) * n[j]) * R1
                 end
 
                 # hop i → j
-                if hop_possible(n, i, j, log_f)
-                    num = log_f[n[j]+2] + log_f[n[i]]
-                    den = log_f[n[j]+1] + log_f[n[i]+1]
-                    log_R2 = num - den
+                if hop_possible(n, i, j, n_max)
+                    # log R = log[ f(nj+1) f(ni-1) / ( f(nj) f(ni) ) ]
+                    log_R2 = (log_f[n[j] + 2] + log_f[n[i]]) - (log_f[n[j] + 1] + log_f[n[i] + 1])
                     R2 = exp(log_R2)
-                    E_kin += -t * sqrt((n[j]+1) * n[i]) * R2
+                    E_kin += -t * sqrt((n[j] + 1) * n[i]) * R2
                 end
             end
         end
@@ -51,21 +46,22 @@ function local_energy(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::System; �
     # Chemical potential correction
     N = sum(n)
 
+    
     return E_kin + E_pot - μ*N, E_kin, E_pot
 end
 
 
 function estimate_energy_gradient(result::VMCResults)
     E_loc = result.energies
-    O_κ = result.derivative_log_psi
+    O_k = result.derivative_log_psi
 
-    if isempty(E_loc) || isempty(O_κ)
+    if isempty(E_loc) || isempty(O_k)
         return NaN
     end
 
-    mean_E = mean(E_loc)
-    mean_O = mean(O_κ)
-    mean_EO = mean(E_loc .* O_κ)
+    mean_E  = mean(E_loc)
+    mean_O  = mean(O_k)
+    mean_EO = mean(E_loc .* conj.(O_k))  # <-- conjugate added!
 
-    return 2 * (mean_EO - mean_E * mean_O)
+    return 2 * real(mean_EO - mean_E * conj(mean_O))
 end
