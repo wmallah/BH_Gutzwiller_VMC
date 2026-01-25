@@ -1,30 +1,6 @@
 using Random
 
 #=
-Purpose: generate initial system states where the particle number on any given site does not exceed n_max
-Input: L (system size), N (total number of particles), n_max (maximum number of particles on a given site)
-Output: system state where n_i <= n_max
-Author: Will Mallah
-Last Updated: 07/04/25
-To-Do: 
-=#
-function initialize_fixed_particles(L::Int, N::Int, n_max::Int)
-    # Create vector of length L with integer values to represent system state
-    config = zeros(Int, L)
-
-    # Loop through the total number of particles in the system to randomly fill the configuration
-    for _ in 1:N
-        site = rand(1:L)
-        while config[site] >= n_max
-            site = rand(1:L)
-        end
-        config[site] += 1
-    end
-    return config
-end
-
-
-#=
 Purpose: estimate value for n_max given kappa parameter and cutoff value for decay of Gutzwiller coefficients
 Input: kappa (variational parameter), cutoff (value for coefficient deemed insignificant)
 Output: particle number where Gutzwiller coefficients are significant

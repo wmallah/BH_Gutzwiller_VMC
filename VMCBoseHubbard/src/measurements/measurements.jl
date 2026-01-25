@@ -1,14 +1,13 @@
 #=
 Purpose: calculate the local energy
-Input: n (vector of integers describing the system state), ψ (wavefunction struct), sys (system struct), n_max (maximum number of particles on a given site)
-Output: total local energy (kinetic + potential)
+Input: n (vector of integers describing the system state), ψ (wavefunction struct), sys (system struct), n_max (maximum site occupancy)
+Output: total local energy (kinetic + potential - chemical), kinetic energy, potential energy
 Author: Will Mallah
-Last Updated: 07/08/25
-    Summary: implemented normalization 
+Last Updated: 01/25/26
 =#
-function local_energy(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::System; μ::Real = 0, n_max = 2)
+function local_energy(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::System; n_max = 2)
     log_f = ψ.f                     # shared Gutzwiller coefficient vector
-    t, U = sys.t, sys.U
+    t, U, μ = sys.t, sys.U, sys.μ
     lattice = sys.lattice
     L = length(n)
 
@@ -45,23 +44,32 @@ function local_energy(n::Vector{Int}, ψ::GutzwillerWavefunction, sys::System; �
 
     # Chemical potential correction
     N = sum(n)
-
     
     return E_kin + E_pot - μ*N, E_kin, E_pot
 end
 
-
+#=
+Purpose: estimate the gradient of the energy for use in gradient descent optimization
+Input: results from Monte Carlo integration
+Output: energy gradient
+Author: Will Mallah
+Last Updated: 01/25/26
+=#
 function estimate_energy_gradient(result::VMCResults)
+    # Pull list of energies and list of wavefunction derivatives
     E_loc = result.energies
     O_k = result.derivative_log_psi
 
+    # If lists are empty, return NaN
     if isempty(E_loc) || isempty(O_k)
         return NaN
     end
 
+    # Calculate mean values
     mean_E  = mean(E_loc)
     mean_O  = mean(O_k)
-    mean_EO = mean(E_loc .* conj.(O_k))  # <-- conjugate added!
+    mean_EO = mean(E_loc .* conj.(O_k))
 
+    # Return energy gradient (see Sorella "Wave function optimization in the variational Monte Carlo method")
     return 2 * real(mean_EO - mean_E * conj(mean_O))
 end

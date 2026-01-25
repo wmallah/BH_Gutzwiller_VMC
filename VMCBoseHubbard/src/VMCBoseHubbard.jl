@@ -6,9 +6,9 @@ module VMCBoseHubbard
 include("lattice/lattice.jl")
 include("system/system.jl")
 include("wavefunction/wavefunction.jl")
-include("vmc/utils.jl")
-include("vmc/moves.jl")
-include("vmc/vmc.jl")
+include("MC/utils.jl")
+include("MC/moves.jl")
+include("MC/MC_integration.jl")
 include("measurements/measurements.jl")
 include("optimizer/gradient_descent.jl")
 
