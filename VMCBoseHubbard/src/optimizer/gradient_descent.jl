@@ -1,27 +1,25 @@
-import ..VMCBoseHubbard: VMC_grand_canonical
-import ..VMCBoseHubbard: VMC_fixed_particles
+import ..VMCBoseHubbard: VMC
 import ..VMCBoseHubbard: estimate_energy_gradient
 
 export optimize_kappa
 
-function optimize_kappa(sys::System, n_max::Int, μ::Float64;
+function optimize_kappa(sys::System, N_target::Int, n_max::Int, μ::Float64, grand_canonical::Bool,
+                          projective::Bool;
                           κ_init::Float64 = 1.0,
                           η::Float64 = 0.05,
-                          N_target::Int = 2,
                           num_walkers::Int = 200,
                           num_MC_steps::Int = 2000,
-                          num_equil_steps::Int = 500)
+                          num_equil_steps::Int = 500,)
 
     κ = κ_init
     history = []
 
     # ---- Initial evaluation ----
-    result_old = VMC_grand_canonical(
-        sys, κ, n_max, μ, N_target;
+    result_old = VMC(
+        sys, N_target, κ, n_max, μ, grand_canonical, projective;
         num_walkers = num_walkers,
         num_MC_steps = num_MC_steps,
         num_equil_steps = num_equil_steps,
-        track_derivative = true
     )
 
     E_old   = result_old.mean_energy
@@ -35,12 +33,11 @@ function optimize_kappa(sys::System, n_max::Int, μ::Float64;
     κ = clamp(κ, 1e-12, 10.0)
 
     while true
-        result_new = VMC_grand_canonical(
-            sys, κ, n_max, μ, N_target;
+        result_new = VMC(
+            sys, N_target, κ, n_max, μ, grand_canonical, projective;
             num_walkers = num_walkers,
             num_MC_steps = num_MC_steps,
             num_equil_steps = num_equil_steps,
-            track_derivative = true
         )
 
         E_new   = result_new.mean_energy

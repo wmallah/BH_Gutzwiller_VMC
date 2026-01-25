@@ -4,23 +4,27 @@ Pkg.activate("../")
 include("../src/VMCBoseHubbard.jl")
 using .VMCBoseHubbard
 
-import ..VMCBoseHubbard: VMC_grand_canonical
+import ..VMCBoseHubbard: VMC
 
 # -----------------------
 # System parameters
 # -----------------------
-L = 2
+L = 4
 N_target = 2
 t = 1.0
 
+# 12x12 mu values
 U_vals = [1.0]
-μ_vals = [0.0]
+μ_vals = [-1.996641490650]
+
+# μ_vals = [0.0, 1.5, 4.2]
 
 dim = "1D"
-canonical = false   # GC ensemble for optimization
+grand_canonical = false
+projective = false
 
 lattice = Lattice1D(L)
-ensemble = canonical ? "C" : "GC"
+ensemble = !grand_canonical ? "C" : "GC"
 
 dir_base = "../data/$(ensemble)/$(dim)/L$(L)_N$(N_target)"
 mkpath(dir_base)
@@ -37,19 +41,18 @@ for (U, μ) in zip(U_vals, μ_vals)
     sys = System(t, U, lattice)
 
     # Conservative truncation
-    n_max = 8
+    n_max = 18
 
     # -----------------------
     # Optimize κ (MC-error stopping)
     # -----------------------
     κ_opt, history = optimize_kappa(
-        sys, n_max, μ;
+        sys, N_target, n_max, μ, grand_canonical, projective;
         κ_init = 1.0,
         η = 0.05,
-        N_target = N_target,
-        num_walkers = 200,
-        num_MC_steps = 4000,
-        num_equil_steps = 1000
+        num_walkers = 400,
+        num_MC_steps = 8000,
+        num_equil_steps = 2000
     )
 
     println("    Optimal κ = $(round(κ_opt, digits=10))")
@@ -57,12 +60,16 @@ for (U, μ) in zip(U_vals, μ_vals)
     # -----------------------
     # Final high-statistics evaluation
     # -----------------------
-    final_result = VMC_grand_canonical(
-        sys, κ_opt, n_max, μ, N_target;
+    final_result = VMC(
+        sys, N_target, κ_opt, n_max, μ, grand_canonical, projective;
         num_walkers = 200,
         num_MC_steps = 50_000,
-        num_equil_steps = 10_000
+        num_equil_steps = 10_000,
     )
+
+    acceptance_ratio = final_result.acceptance_ratio
+
+    println("Acceptance Ratio: $acceptance_ratio")
 
     push!(results, (U = U, κ = κ_opt, result = final_result))
 

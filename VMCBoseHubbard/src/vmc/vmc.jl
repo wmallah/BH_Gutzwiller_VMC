@@ -180,13 +180,10 @@ Output: struct of variational Monte Carlo results (see struct defined above)
 Author: Will Mallah
 Last Updated: 07/16/25
 =#
-function VMC_grand_canonical(sys::System, κ::Real, n_max::Int,
-                              μ::Real,
-                              N_target::Int;
+function VMC(sys::System, N_target::Int, κ::Real, n_max::Int, μ::Real, grand_canonical, projective;
                               num_walkers::Int = 200,
                               num_MC_steps::Int = 30000,
-                              num_equil_steps::Int = 5000,
-                              track_derivative::Bool = false)
+                              num_equil_steps::Int = 5000)
 
     # Extract the system size from the number of rows in the adjacency matrix
     L = length(sys.lattice.neighbors)
@@ -225,16 +222,31 @@ function VMC_grand_canonical(sys::System, κ::Real, n_max::Int,
             # Randomly select a site of the current configuration
             site = rand(1:L)
 
-            # Add or remove a particle on this site with 50/50 probability
-            if rand() < 0.5
-                n_new[site] += 1
+            if grand_canonical
+                # Add or remove a particle on this site with 50/50 probability
+                if rand() < 0.5
+                    n_new[site] += 1
+                else
+                    n_new[site] -= 1
+                end
             else
-                n_new[site] -= 1
+                # Hop particle from random site to random neigbor site
+                from = site
+                to = rand(sys.lattice.neighbors[from])
+
+                n_new[from] -= 1
+                n_new[to] += 1
+
+                if n_new[to] > n_max
+                    num_failed_moves += 1
+                    continue
+                end
             end
 
             # Reject proposed move if unphysical
             if n_new[site] > n_max || n_new[site] < 0
                 num_failed_moves += 1
+                continue
             else
                 # Single-site Gutzwiller log acceptance ratio:
                 # log( |Ψ(new)|^2 / |Ψ(old)|^2 ) = 2*(log|f(n_new)| - log|f(n_old)|)
@@ -248,6 +260,7 @@ function VMC_grand_canonical(sys::System, κ::Real, n_max::Int,
                     num_accepted_moves += 1
                 else
                     num_failed_moves += 1
+                    continue
                 end
             end
             
@@ -261,7 +274,8 @@ function VMC_grand_canonical(sys::System, κ::Real, n_max::Int,
             if check_and_warn_walker(walkers[i], n_max)
                 # Only make measurements after equilibration and with the target number of particles in the system
                 if step >= num_equil_steps
-                    # if N_now == N_target
+                    # If we are not projecting (non-projective grand canonical or canonical), measure. If we are projecting (projective grand canonical), only measure if the number of particles is our target number of particles
+                    if !projective || (projective && N_now == N_target)
                         # Measure the total local energy as well as the kinetic and potential energies separately
                         E, T, V = local_energy(walkers[i], wf, sys; μ=μ, n_max=n_max)
 
@@ -272,20 +286,18 @@ function VMC_grand_canonical(sys::System, κ::Real, n_max::Int,
                             push!(potential, V)
                             push!(total_N, N_now)
                             # Calculate and track this value (derivative of log psi) for the gradient in our Gradient Descent optimization method
-                            if track_derivative
-                                val = -0.5 * sum(walkers[i] .^ 2)
-                                if !isfinite(val)
-                                    @warn "Non-finite derivative_log_psi value: $val"
-                                else
-                                    push!(derivative_log_psi, val)
-                                end
+                            val = -0.5 * sum(walkers[i] .^ 2)
+                            if !isfinite(val)
+                                @warn "Non-finite derivative_log_psi value: $val"
+                            else
+                                push!(derivative_log_psi, val)
                             end
                         else
                             @warn "Non-finite local energy detected: E = $E"
                             continue
                         end
                     end
-                # end
+                end
             else
                 @warn "Invalid walker skipped"
             end

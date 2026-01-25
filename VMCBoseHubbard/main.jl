@@ -4,7 +4,7 @@ Pkg.activate(".")  # Activate project in current folder
 include("src/VMCBoseHubbard.jl")
 using .VMCBoseHubbard
 
-import ..VMCBoseHubbard: VMC_grand_canonical
+import ..VMCBoseHubbard: VMC
 
 # Example run
 L = 12
@@ -17,6 +17,6 @@ for U in U_vals
     println("Running U = $U")
     sys = System(1.0, U, lattice)
     k_opt, history = optimize_kappa(sys, n_max; N_target = N)
-    result = VMC_grand_canonical(sys, k_opt, n_max)
+    result = VMC(sys, k_opt, n_max)
     println("κ = $(k_opt), E = $(result.mean_energy)")
 end
